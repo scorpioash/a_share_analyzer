@@ -1,0 +1,16 @@
+# 数据抓取与处理
+akshare
+pandas
+
+# 大模型接口 (统一通过官方 SDK 或轻量化封装)
+openai
+anthropic
+google-genai
+
+# 请求与工具
+httpx
+python-dotenv
+pytz
+
+# Web UI 可视化界面
+streamlit

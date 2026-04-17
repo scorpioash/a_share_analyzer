@@ -1,0 +1,47 @@
+name: Daily A-Share Analysis
+
+on:
+  schedule:
+    # 每天北京时间下午 16:00 (UTC 8:00) 自动执行
+    - cron: '0 8 * * 1-5'
+  
+  # 支持手动指定股票代码一键触发
+  workflow_dispatch:
+    inputs:
+      stocks:
+        description: '临时指定要分析的A股代码（选填，逗号分隔，覆盖 Secrets 设置）'
+        required: false
+        default: ''
+
+jobs:
+  run-analyzer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Python 环境
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: 安装核心依赖
+        run: pip install -r requirements.txt
+
+      - name: 执行盘后分析
+        env:
+          # 以下变量请在 GitHub 仓库的 Settings -> Secrets and variables -> Actions 中配置
+          LLM_PROVIDER: ${{ secrets.LLM_PROVIDER || 'openai' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ secrets.OPENAI_MODEL }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ secrets.ANTHROPIC_MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          # 股票池：如果手动点击了运行并输入了代码，优先使用输入的代码；否则使用 Secrets 里的配置
+          STOCK_LIST: ${{ github.event.inputs.stocks || secrets.STOCK_LIST }}
+        run: |
+          python main.py

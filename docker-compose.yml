@@ -1,0 +1,13 @@
+version: '3.8'
+services:
+  analyzer:
+    build: .
+    container_name: minimal_ashare_analyzer
+    ports:
+      - "8501:8501"
+    env_file:
+      - .env
+    volumes:
+      # 将宿主机的经验策略文件映射入容器，方便宿主机直接用记事本热更新策略
+      - ./my_strategy.md:/app/my_strategy.md
+    restart: unless-stopped
