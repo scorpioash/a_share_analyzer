@@ -1,7 +1,29 @@
 import akshare as ak
 import pandas as pd
 import datetime
+import os
 
+# --- 强制国内数据直连：防止代理软件拦截国内证券交易所数据导致 SSL 报错 ---
+os.environ["NO_PROXY"] = "localhost,127.0.0.1,.bse.cn,.eastmoney.com,.sina.com.cn,.163.com"
+os.environ["no_proxy"] = "localhost,127.0.0.1,.bse.cn,.eastmoney.com,.sina.com.cn,.163.com"
+# ---------------------------------------------------------------------------------
+try:
+    import ssl
+    import requests
+    import urllib3
+    # 禁用 urllib3 的安全警告
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    # 取消内置库的证书校验
+    ssl._create_default_https_context = ssl._create_unverified_context
+    # Hook requests session 取消底层抓取的证书校验
+    _orig_request = requests.Session.request
+    def _patched_request(*args, **kwargs):
+        kwargs['verify'] = False
+        return _orig_request(*args, **kwargs)
+    requests.Session.request = _patched_request
+except Exception:
+    pass
+# ---------------------------------------------------------------------------------
 class AShareDataFetcher:
     def __init__(self):
         pass
@@ -115,7 +137,7 @@ class AShareDataFetcher:
         context += "## 3. 近期关键新闻面\n"
         context += self.get_news(code) + "\n"
         
-        return context
+        return code, name, context
 
 if __name__ == "__main__":
     # 简单测试入口
