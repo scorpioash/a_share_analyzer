@@ -23,8 +23,8 @@ call venv\Scripts\activate.bat
 
 :: 4. 安装更新依赖
 echo [+] 正在安装或校验依赖环境...
-python -m pip install --upgrade pip -q
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple -q
+python -m pip install --upgrade pip -q -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn
+pip install -r requirements.txt -i http://pypi.tuna.tsinghua.edu.cn/simple --trusted-host pypi.tuna.tsinghua.edu.cn -q
 
 :: 5. 配置文件预处理
 if not exist ".env" (
