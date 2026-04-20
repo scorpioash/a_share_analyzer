@@ -397,21 +397,36 @@ class AShareDataFetcher:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
             market = self._get_market_prefix(clean_code)
             symbol = f"{market}{clean_code}"
+            
+            df = pd.DataFrame()
             with bypass_proxy():
-                try:
-                    df = ak.stock_gdfx_free_top_10_em(symbol=symbol, date="")
-                except KeyError:
-                    # 某些股票或时期的流通股东无 sdltgd 字段，降级到非流通十大股东接口
-                    df = ak.stock_gdfx_top_10_em(symbol=symbol, date="")
+                # 尝试多个接口和符号组合
+                for api_func in [ak.stock_gdfx_free_top_10_em, ak.stock_gdfx_top_10_em]:
+                    for s in [symbol, clean_code]:
+                        try:
+                            df = api_func(symbol=s, date="")
+                            if df is not None and not df.empty:
+                                break
+                        except Exception:
+                            continue
+                    if not df.empty:
+                        break
+            
             if df.empty:
                 return None
-            cols = ['股东名称', '持股数', '持股比例', '增减', '变动比例']
-            available = [c for c in cols if c in df.columns]
+                
+            # 常见列名映射
+            cols_map = {'股东名称': '股东名称', '持股人名称': '股东名称', '持股数量': '持股数', '持股比例': '持股比例'}
+            df = df.rename(columns=cols_map)
+            
+            target_cols = ['股东名称', '持股数', '持股比例', '增减', '变动比例']
+            available = [c for c in target_cols if c in df.columns]
+            
             if not available:
                 return df.head(10)
             return df[available].head(10)
         except Exception as e:
-            print(f"获取股东数据发生异常: {e}")
+            print(f"获取股东数据最终失败: {e}")
             return None
 
     def get_profit_forecast(self, code: str) -> str:
@@ -509,17 +524,36 @@ class AShareDataFetcher:
             has_em_cols = any(c in df.columns for c in cols_to_check)
             
             if '证券代码' in df.columns or has_em_cols:
-                # 处理 ak.stock_zh_a_gdhs 或 cninfo 格式
-                matched = df
+                # 统一清理代码字段以便匹配
                 if '证券代码' in df.columns:
+                    df['证券代码'] = df['证券代码'].astype(str).str.zfill(6)
                     matched = df[df['证券代码'] == clean_code]
+                else:
+                    matched = df
                     
                 if not matched.empty:
-                    # 获取最近的一次数据点
-                    row = matched.iloc[-1] if not has_em_cols else matched.iloc[0]
+                    # 重要修复：确保按日期排序并取出最新一行
+                    # 通常 df 是按日期降序或升序，我们需要业务含义上的“最近日期”
+                    # 如果有统计截止日期，先尝试排序
+                    if '统计截止日期' in matched.columns:
+                        matched = matched.sort_values('统计截止日期', ascending=True)
+                    
+                    # 取最后一行（即日期最晚的一行）
+                    row = matched.iloc[-1]
                     lines = []
-                    for col in matched.columns:
-                        lines.append(f"- {col}: {row[col]}")
+                    # 只展示用户关心的核心列，避免刷屏
+                    display_cols = ['统计截止日期', '本次户数', '上次户数', '增减比例', '户均持股数量']
+                    for col in display_cols:
+                        if col in row.index:
+                            lines.append(f"- {col}: {row[col]}")
+                        elif col in matched.columns:
+                            lines.append(f"- {col}: {row[col]}")
+                    
+                    if not lines:
+                        # 兜底：展示前5列
+                        for col in matched.columns[:5]:
+                            lines.append(f"- {col}: {row[col]}")
+                            
                     return "\n".join(lines)
             return "未查到该股近期的股东户数数据"
         except Exception as e:
