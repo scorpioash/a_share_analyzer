@@ -154,7 +154,7 @@ docker-compose up -d
 ```
 a_share_analyzer/
 ├── 首页.py                  # 主入口文件（启动后的首页）
-├── data_fetcher.py          # 数据抓取引擎（AkShare 接口封装）
+├── data_fetcher.py          # 数据抓取引擎
 ├── llm_analyzer.py          # AI 分析引擎（多模型适配）
 ├── my_strategy.md           # 你的个股投资策略（可自定义）
 ├── my_board_strategy.md     # 你的板块分析策略（可自定义）
