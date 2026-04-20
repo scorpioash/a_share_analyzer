@@ -1,11 +1,25 @@
 import streamlit as st
+import os
+import sys
 import datetime
-from data_fetcher import AShareDataFetcher
+
+# 注入根目录路径
+sys.path.append(os.path.abspath("."))
+
+from visual_style import inject_premium_style, show_error_clean
+from market_monitor import render_market_monitor
+
+# --- 注入视觉与监控 ---
+inject_premium_style()
 
 if 'fetcher' not in st.session_state:
+    from data_fetcher import AShareDataFetcher
     st.session_state['fetcher'] = AShareDataFetcher()
 
 fetcher = st.session_state['fetcher']
+
+# 渲染侧边栏市场心跳仪表盘
+render_market_monitor(fetcher)
 
 st.title("🐉 龙虎榜与资金流")
 st.markdown("跟踪市场最敏锐的活跃资金、机构席位异动以及主力资金排名。")
