@@ -581,6 +581,65 @@ class AShareDataFetcher:
 
     # ==================== 板块分析模块 ====================
 
+    def get_technical_indicators(self, code: str) -> str:
+        """
+        [核心增强] 获取个股在同花顺 11 个技术极值榜单中的状态。
+        如果是普通个股扫描，会返回该个股命中的所有极值标签。
+        """
+        try:
+            clean_code = code.lower().replace('sh', '').replace('sz', '')
+            hits = []
+            
+            # 使用列表存储需要扫描的榜单 API 信息
+            # 名称, 函数名, 参数(如果有)
+            tech_tasks = [
+                ("创月新高", ak.stock_rank_cxg_ths, {"symbol": "创月新高"}),
+                ("半年新高", ak.stock_rank_cxg_ths, {"symbol": "半年新高"}),
+                ("一年新高", ak.stock_rank_cxg_ths, {"symbol": "一年新高"}),
+                ("连续上涨", ak.stock_rank_lxsz_ths, {}),
+                ("向上突破", ak.stock_rank_xstp_ths, {"symbol": "60日均线"}),
+                ("持续放量", ak.stock_rank_cxfl_ths, {}),
+                ("持续缩量", ak.stock_rank_cxsl_ths, {}),
+                ("量价齐升", ak.stock_rank_ljqs_ths, {}),
+                ("险资举牌", ak.stock_rank_xzjp_ths, {}),
+                ("创月新低", ak.stock_rank_cxd_ths, {"symbol": "创月新低"}),
+                ("向下突破", ak.stock_rank_xxtp_ths, {"symbol": "60日均线"}),
+            ]
+
+            with bypass_proxy():
+                for label, func, kwargs in tech_tasks:
+                    try:
+                        # 注意：由于实时并联抓取 11 个榜单较慢，此处未来可加入全局缓存
+                        df = func(**kwargs)
+                        if df is not None and not df.empty:
+                            # 统一查找代码列
+                            code_col = '股票代码' if '股票代码' in df.columns else (
+                                '代码' if '代码' in df.columns else df.columns[1] # 兜底逻辑
+                            )
+                            # 判定是否命中
+                            if clean_code in df[code_col].astype(str).tolist():
+                                row = df[df[code_col].astype(str) == clean_code].iloc[0]
+                                rank = row.get('排名', 'N/A')
+                                detail = ""
+                                if '连续天数' in df.columns:
+                                    detail = f" (已持续 {row['连续天数']} 天)"
+                                elif '突破均线' in df.columns:
+                                    detail = f" (突破 {row['突破均线']})"
+                                
+                                hits.append(f"- 【{label}】: 处于榜单第 {rank} 名{detail}")
+                    except Exception:
+                        continue
+
+            if not hits:
+                return "技术面分析：目前该股表现平稳，未命中显着的技术极值（如新高、突破、异动放量等）榜单。"
+            
+            report = "### [!IMPORTANT] 发现以下静默技术面极值异动：\n"
+            report += "\n".join(hits)
+            report += "\n\n> 注：这些指标代表了当前市场最真实的技术派选股动向，请 AI 务必结合量价进行深度推演。"
+            return report
+        except Exception as e:
+            return f"获取技术指标失败: {e}"
+
     def get_stock_popularity(self, code: str) -> str:
         """获取近期人气和热度，赋予 LLM 情绪因子的判断基准"""
         try:
@@ -871,10 +930,39 @@ class AShareDataFetcher:
                 context += f"| {sb['name']} | {sb['overlap_count']} | {sb['overlap_ratio']} | {sb['change_pct']}% |\n"
             context += "\n"
 
-            # 取前3个关联度最高的子板块，拉取它们的走势
+                # 取前3个关联度最高的子板块，拉取它们的走势
             for sb in sub_boards[:3]:
                 context += f"### 子板块: {sb['name']} 近期走势\n"
                 context += self.get_board_history(sb['name'], '概念板块', limit=5) + "\n\n"
+
+        # 加入板块技术面检测
+        context += "## 5. 板块技术极值特征 (静默扫描)\n"
+        try:
+            # 统计板块前10个成分股的极值命中情况
+            import re
+            board_cons = re.findall(r'\|\s*(\d+)\s*\|', constituents_md)
+            if board_cons:
+                hit_count = 0
+                sample_size = min(len(board_cons), 10)
+                # 拿典型的极值榜单做抽样
+                with bypass_proxy():
+                    high_df = ak.stock_rank_cxg_ths(symbol="半年新高")
+                    break_df = ak.stock_rank_xstp_ths(symbol="20日均线")
+                
+                high_list = high_df['股票代码'].astype(str).tolist() if not high_df.empty else []
+                break_list = break_df['股票代码'].astype(str).tolist() if not break_df.empty else []
+                
+                for c in board_cons[:sample_size]:
+                    if c in high_list or c in break_list:
+                        hit_count += 1
+                
+                context += f"抽样检测显示：该板块核心成分股中，约 {int(hit_count/sample_size*100)}% 的股票处于技术极值状态（新高/突破）。\n"
+                if hit_count > 0:
+                    context += "板块整体技术形态偏强，建议 AI 关注是否存在整体溢价机会。\n"
+                else:
+                    context += "板块成分股目前技术形态较为温和，建议 AI 从基本面或异动面寻找逻辑。\n"
+        except Exception:
+            context += "板块技术极值扫描失败。\n"
 
         return context
 
