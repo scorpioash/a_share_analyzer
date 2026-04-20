@@ -35,4 +35,4 @@ fi
 
 # 6. 启动 Web 界面
 echo "[+] 正在启动 Web 服务器，端口 8501 待命..."
-streamlit run web_ui.py
+streamlit run 首页.py
