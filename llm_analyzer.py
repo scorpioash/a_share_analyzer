@@ -15,6 +15,13 @@ class LLMAnalyzer:
                 return f.read()
         return "请分析以下A股数据并给出操作建议。"
 
+    def _load_board_strategy(self):
+        strategy_path = os.path.join(os.path.dirname(__file__), "my_board_strategy.md")
+        if os.path.exists(strategy_path):
+            with open(strategy_path, "r", encoding="utf-8") as f:
+                return f.read()
+        return "请分析以下A股板块数据并给出操作建议。"
+
     def analyze(self, data_context: str) -> str:
         """调用选定的大模型进行总结分析"""
         system_prompt = (
@@ -97,6 +104,42 @@ class LLMAnalyzer:
             return response.text
         except Exception as e:
             return f"Gemini 调用失败: {e}"
+
+    def analyze_board(self, data_context: str, board_name: str) -> str:
+        """专门用于板块分析的方法，带有板块拆解推理链路的提示词"""
+        # 加载板块专属策略文件
+        board_strategy = self._load_board_strategy()
+        
+        system_prompt = (
+            "你是我的专业级 A 股板块轮动分析师。请严格根据下方我的个人板块分析策略与铁律进行判读。\n\n"
+            f"=== 个人板块分析策略与经验铁律 ===\n{board_strategy}\n"
+            "==============================\n"
+        )
+
+        user_prompt = (
+            f"以下是关于【{board_name}】板块的最新数据（含主板块走势、成分股、以及通过成分股重叠度"
+            f"反向发现的关联细分子板块）：\n\n{data_context}\n\n"
+            "请严格按照以下结构输出你的分析报告：\n\n"
+            "## 一、板块拆解推理链\n"
+            f"请展示你的推理思维过程：从【{board_name}】这个大板块出发，根据上述数据中发现的"
+            "关联子板块和成分股的交叉关系，**逐步推导出最值得关注的 2-3 个细分子板块**，"
+            "并说明每一步推理的逻辑依据。\n"
+            "格式示例：\n"
+            f"  {board_name} → [子板块A]（因为xxx） → [更细分方向]（因为xxx）\n\n"
+            "## 二、主板块走势诊断\n"
+            "分析主板块近期的量价趋势、强弱信号。\n\n"
+            "## 三、细分方向对比\n"
+            "对比各个关联子板块的走势强弱，指出哪个细分赛道当前最具爆发潜力或最危险。\n\n"
+            "## 四、操作建议\n"
+            "给出最终的板块级别操作策略（关注/观望/回避），并指出最值得重点跟踪的 1-2 只成分股标的。"
+        )
+
+        if self.provider == "anthropic":
+            return self._call_anthropic(system_prompt, user_prompt)
+        elif self.provider == "gemini":
+            return self._call_gemini(system_prompt, user_prompt)
+        else:
+            return self._call_openai_compatible(system_prompt, user_prompt)
 
 if __name__ == "__main__":
     analyzer = LLMAnalyzer()
