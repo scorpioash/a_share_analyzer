@@ -1,15 +1,29 @@
 import streamlit as st
-from data_fetcher import AShareDataFetcher
+import os
+import sys
+
+# 注入根目录路径
+sys.path.append(os.path.abspath("."))
+
+from visual_style import inject_premium_style, show_error_clean
+from market_monitor import render_market_monitor
+
+# --- 注入视觉与监控 ---
+inject_premium_style()
 
 if 'fetcher' not in st.session_state:
+    from data_fetcher import AShareDataFetcher
     st.session_state['fetcher'] = AShareDataFetcher()
 
 fetcher = st.session_state['fetcher']
 
+# 渲染侧边栏市场心跳仪表盘
+render_market_monitor(fetcher)
+
 st.title("📈 行情中心")
 st.markdown("全市场实时行情数据大盘点。")
 
-market_type = st.selectbox("🎯 选择市场", ["主板", "创业板", "科创板", "北交所"])
+market_type = st.selectbox("🎯 选择市场", ["沪深主板", "创业板", "科创板", "北交所"])
 
 st.info("因数据量较大，为避免接口耗流，请手动点击获取行情。")
 
