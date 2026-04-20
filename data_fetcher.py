@@ -1,3 +1,4 @@
+import streamlit as st
 import akshare as ak
 import pandas as pd
 # 强制设置 Pandas 使用 python 模式存储字符串，防止 PyArrow 在处理 akshare 的正则时报错 (\u 问题)
@@ -392,41 +393,60 @@ class AShareDataFetcher:
             return f"获取资金流向失败: {e}"
 
     def get_top_shareholders(self, code: str) -> "pd.DataFrame":
-        """获取十大流通股东"""
+        """获取十大流通股东 - 增强版（含日期回溯探测）"""
         try:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
             market = self._get_market_prefix(clean_code)
-            symbol = f"{market}{clean_code}"
+            symbol_with_prefix = f"{market}{clean_code}"
             
             df = pd.DataFrame()
             with bypass_proxy():
-                # 尝试多个接口和符号组合
+                import datetime
+                curr_year = datetime.date.today().year
+                # 策略：如果""(最新)失败，回溯探测近两年的所有财报截止日
+                test_dates = [""]
+                for y in [curr_year, curr_year-1]:
+                    test_dates.extend([f"{y}0331", f"{y}0630", f"{y}0930", f"{y}1231"])
+                
+                found = False
+                # 接口尝试列表：流通十大 -> 十大股东
                 for api_func in [ak.stock_gdfx_free_top_10_em, ak.stock_gdfx_top_10_em]:
-                    for s in [symbol, clean_code]:
-                        try:
-                            df = api_func(symbol=s, date="")
-                            if df is not None and not df.empty:
-                                break
-                        except Exception:
-                            continue
-                    if not df.empty:
-                        break
+                    for s in [symbol_with_prefix, clean_code]:
+                        for d in test_dates:
+                            try:
+                                temp = api_func(symbol=s, date=d)
+                                if temp is not None and not temp.empty:
+                                    df = temp
+                                    found = True
+                                    break
+                            except Exception:
+                                continue
+                        if found: break
+                    if found: break
             
             if df.empty:
+                # 终极保底：尝试获取基本面快照作为替代展示
+                try:
+                    with bypass_proxy():
+                        df = ak.stock_individual_info_em(symbol=clean_code)
+                        if not df.empty:
+                            return df.rename(columns={'item': '项目', 'value': '数值'})
+                except: pass
                 return None
                 
-            # 常见列名映射
-            cols_map = {'股东名称': '股东名称', '持股人名称': '股东名称', '持股数量': '持股数', '持股比例': '持股比例'}
+            # 标准化处理
+            cols_map = {
+                '股东名称': '股东名称', '持股人名称': '股东名称', 
+                '持股数量': '持股数', '持股数量(股)': '持股数',
+                '持股比例': '持股比例', '持股比例(%)': '持股比例'
+            }
             df = df.rename(columns=cols_map)
-            
             target_cols = ['股东名称', '持股数', '持股比例', '增减', '变动比例']
             available = [c for c in target_cols if c in df.columns]
             
-            if not available:
-                return df.head(10)
-            return df[available].head(10)
+            return df[available].head(10) if available else df.head(10)
         except Exception as e:
-            print(f"获取股东数据最终失败: {e}")
+            print(f"获取股东数据发生异常: {e}")
             return None
 
     def get_profit_forecast(self, code: str) -> str:
@@ -506,56 +526,89 @@ class AShareDataFetcher:
             return f"获取龙虎榜数据失败: {e}"
 
     def get_shareholder_count(self, code: str) -> str:
-        """获取股东户数变化趋势"""
+        """获取股东户数变化趋势 - 鲁棒性增强版"""
         try:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
-            with bypass_proxy():
-                try:
-                    # 优先使用东方财富股东户数更稳定，免去 cninfo 的 SSL 问题
-                    df = ak.stock_zh_a_gdhs(symbol=clean_code)
-                except Exception:
-                    # 降级备用
-                    df = ak.stock_hold_num_cninfo(date="")
-                    
-            if df.empty:
-                return "暂无股东户数数据"
-                
-            cols_to_check = ['本次户数', '上次户数', '增减张数', '户数降幅']
-            has_em_cols = any(c in df.columns for c in cols_to_check)
+            df = pd.DataFrame()
             
-            if '证券代码' in df.columns or has_em_cols:
-                # 统一清理代码字段以便匹配
-                if '证券代码' in df.columns:
-                    df['证券代码'] = df['证券代码'].astype(str).str.zfill(6)
-                    matched = df[df['证券代码'] == clean_code]
-                else:
-                    matched = df
-                    
-                if not matched.empty:
-                    # 重要修复：确保按日期排序并取出最新一行
-                    # 通常 df 是按日期降序或升序，我们需要业务含义上的“最近日期”
-                    # 如果有统计截止日期，先尝试排序
-                    if '统计截止日期' in matched.columns:
-                        matched = matched.sort_values('统计截止日期', ascending=True)
-                    
-                    # 取最后一行（即日期最晚的一行）
-                    row = matched.iloc[-1]
-                    lines = []
-                    # 只展示用户关心的核心列，避免刷屏
-                    display_cols = ['统计截止日期', '本次户数', '上次户数', '增减比例', '户均持股数量']
-                    for col in display_cols:
-                        if col in row.index:
-                            lines.append(f"- {col}: {row[col]}")
-                        elif col in matched.columns:
-                            lines.append(f"- {col}: {row[col]}")
-                    
-                    if not lines:
-                        # 兜底：展示前5列
-                        for col in matched.columns[:5]:
-                            lines.append(f"- {col}: {row[col]}")
+            with bypass_proxy():
+                # 尝试多个可靠的数据源
+                sources = [
+                    (ak.stock_zh_a_gdhs, {"symbol": clean_code}),
+                    (ak.stock_hold_num_cninfo, {"date": ""})  # 巨潮全市场最新
+                ]
+                
+                for func, kwargs in sources:
+                    try:
+                        temp = func(**kwargs)
+                        if temp is not None and not temp.empty:
+                            # 判定是否包含我们的目标股票
+                            code_col = None
+                            for c in ['证券代码', '代码', '股票代码']:
+                                if c in temp.columns:
+                                    code_col = c
+                                    break
                             
-                    return "\n".join(lines)
-            return "未查到该股近期的股东户数数据"
+                            if code_col:
+                                temp[code_col] = temp[code_col].astype(str).str.zfill(6)
+                                match = temp[temp[code_col] == clean_code]
+                                if not match.empty:
+                                    df = match
+                                    break
+                            else:
+                                # 如果是单支股票接口返回的，没有代码列也行
+                                df = temp
+                                break
+                    except Exception:
+                        continue
+            
+            if df.empty:
+                # 最终保底：从个股概况里抓个当前数值
+                try:
+                    info = ak.stock_individual_info_em(symbol=clean_code)
+                    count_row = info[info['item'] == '股东人数']
+                    if not count_row.empty:
+                        return f"- 统计截止日期: 最新\n- 本次户数: {count_row['value'].values[0]}"
+                except: pass
+                return "未查到该股近期的股东户数数据"
+                
+            # 尝试识别日期列进行排序
+            date_col = next((c for c in ['统计截止日期', '公告日期', '截止日期'] if c in df.columns), None)
+            if date_col:
+                try:
+                    # 强转日期类型排序，确保 iloc[-1] 是最新的
+                    df[date_col] = pd.to_datetime(df[date_col], errors='coerce')
+                    df = df.dropna(subset=[date_col]).sort_values(date_col, ascending=True)
+                except:
+                    pass
+            
+            latest_row = df.iloc[-1]
+            lines = []
+            # 灵活匹配显示列
+            display_map = {
+                '统计截止日期': '截止日期',
+                '本次户数': '最新股东户数',
+                '上次户数': '前一期户数',
+                '增减比例': '户数增减比',
+                '户数降幅': '户数降幅'
+            }
+            
+            for key, label in display_map.items():
+                for actual_col in df.columns:
+                    if key in actual_col:
+                        val = latest_row[actual_col]
+                        # 格式化日期
+                        if '日期' in actual_col and hasattr(val, 'strftime'):
+                            val = val.strftime('%Y-%m-%d')
+                        lines.append(f"- {label}: {val}")
+                        break
+            
+            if not lines:
+                # 极端兜底
+                for col in df.columns[:min(4, len(df.columns))]:
+                    lines.append(f"- {col}: {latest_row[col]}")
+                    
+            return "\n".join(lines)
         except Exception as e:
             return f"获取股东户数失败: {e}"
 
@@ -999,6 +1052,68 @@ class AShareDataFetcher:
             context += "板块技术极值扫描失败。\n"
 
         return context
+
+    def get_realtime_quotes(self, market_type: str) -> "pd.DataFrame":
+        """获取全市场实时行情数据并过滤"""
+        try:
+            with bypass_proxy():
+                import akshare as ak
+                df = ak.stock_zh_a_spot_em()
+                if df is None or df.empty:
+                    return None
+            
+            # 代码补全 6 位
+            df['代码'] = df['代码'].astype(str).str.zfill(6)
+            
+            if market_type == "沪深主板":
+                # 沪主板: 600/601/603/605; 深主板: 000/001/002/003
+                return df[df['代码'].str.startswith(('600', '601', '603', '605', '000', '001', '002', '003'))]
+            elif market_type == "创业板":
+                return df[df['代码'].str.startswith(('300', '301'))]
+            elif market_type == "科创板":
+                return df[df['代码'].str.startswith('688')]
+            elif market_type == "北交所":
+                return df[df['代码'].str.startswith(('8', '4', '9'))]
+            
+            return df
+        except Exception as e:
+            print(f"获取实时行情失败: {e}")
+            return None
+
+    def get_market_sentiment(self) -> dict:
+        """获取全市场情绪统计数据（涨跌家数、成交量等）"""
+        try:
+            with bypass_proxy():
+                df = _fetch_all_spot_cached()
+                if df is None or df.empty: return None
+                
+                up = len(df[df['涨跌幅'] > 0])
+                down = len(df[df['涨跌幅'] < 0])
+                flat = len(df) - up - down
+                total_volume = df['成交额'].sum() / 100000000 # 亿元
+                
+                # 计算市场温度 (0-100)
+                temp = (up / (up + down + 0.1)) * 100
+                
+                return {
+                    'up': up,
+                    'down': down,
+                    'flat': flat,
+                    'volume': total_volume,
+                    'temperature': temp,
+                    'count': len(df)
+                }
+        except Exception as e:
+            print(f"获取市场情绪失败: {e}")
+            return None
+
+@st.cache_data(ttl=60)
+def _fetch_all_spot_cached():
+    import akshare as ak
+    try:
+        return ak.stock_zh_a_spot_em()
+    except:
+        return None
 
 if __name__ == "__main__":
     fetcher = AShareDataFetcher()
