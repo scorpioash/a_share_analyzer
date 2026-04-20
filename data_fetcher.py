@@ -118,6 +118,200 @@ class AShareDataFetcher:
         
         return code, name, context
 
+    # ==================== 板块分析模块 ====================
+
+    def get_industry_board_list(self) -> pd.DataFrame:
+        """获取东方财富行业板块列表"""
+        try:
+            with bypass_proxy():
+                df = ak.stock_board_industry_name_em()
+            return df
+        except Exception as e:
+            return pd.DataFrame()
+
+    def get_concept_board_list(self) -> pd.DataFrame:
+        """获取东方财富概念板块列表"""
+        try:
+            with bypass_proxy():
+                df = ak.stock_board_concept_name_em()
+            return df
+        except Exception as e:
+            return pd.DataFrame()
+
+    def search_board(self, query: str) -> list[dict]:
+        """根据关键词模糊搜索板块（行业+概念），返回匹配结果列表"""
+        results = []
+        query_lower = query.lower().strip()
+        try:
+            industry_df = self.get_industry_board_list()
+            if not industry_df.empty and '板块名称' in industry_df.columns:
+                matched = industry_df[industry_df['板块名称'].str.contains(query_lower, case=False, na=False)]
+                for _, row in matched.iterrows():
+                    results.append({
+                        'name': row['板块名称'],
+                        'code': row.get('板块代码', ''),
+                        'type': '行业板块',
+                        'change_pct': row.get('涨跌幅', ''),
+                        'total_mv': row.get('总市值', ''),
+                    })
+        except Exception:
+            pass
+        try:
+            concept_df = self.get_concept_board_list()
+            if not concept_df.empty and '板块名称' in concept_df.columns:
+                matched = concept_df[concept_df['板块名称'].str.contains(query_lower, case=False, na=False)]
+                for _, row in matched.iterrows():
+                    results.append({
+                        'name': row['板块名称'],
+                        'code': row.get('板块代码', ''),
+                        'type': '概念板块',
+                        'change_pct': row.get('涨跌幅', ''),
+                        'total_mv': row.get('总市值', ''),
+                    })
+        except Exception:
+            pass
+        return results
+
+    def get_board_constituents(self, board_name: str, board_type: str = "行业板块", top_n: int = 10) -> str:
+        """获取板块成分股（取涨跌幅前 top_n）"""
+        try:
+            with bypass_proxy():
+                if board_type == "概念板块":
+                    df = ak.stock_board_concept_cons_em(symbol=board_name)
+                else:
+                    df = ak.stock_board_industry_cons_em(symbol=board_name)
+
+            if df.empty:
+                return "暂无成分股数据"
+
+            # 统一列名处理
+            cols_map = {'代码': '代码', '名称': '名称', '最新价': '最新价', '涨跌幅': '涨跌幅',
+                        '涨跌额': '涨跌额', '成交量': '成交量', '成交额': '成交额', '换手率': '换手率'}
+            available = [c for c in cols_map.keys() if c in df.columns]
+
+            if '涨跌幅' in df.columns:
+                df = df.sort_values('涨跌幅', ascending=False)
+
+            display_df = df[available].head(top_n)
+            return display_df.to_markdown(index=False)
+        except Exception as e:
+            return f"获取成分股失败: {e}"
+
+    def get_board_history(self, board_name: str, board_type: str = "行业板块", limit: int = 10) -> str:
+        """获取板块近期历史行情"""
+        try:
+            with bypass_proxy():
+                if board_type == "概念板块":
+                    df = ak.stock_board_concept_hist_em(symbol=board_name, period="日k", adjust="")
+                else:
+                    df = ak.stock_board_industry_hist_em(symbol=board_name, period="日k", adjust="")
+
+            if df.empty:
+                return "暂无板块历史行情数据"
+
+            df = df.tail(limit)
+            headers = ["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "振幅", "涨跌幅", "涨跌额", "换手率"]
+            available = [h for h in headers if h in df.columns]
+            if not available:
+                return df.tail(limit).to_markdown()
+            return df[available].to_markdown(index=False)
+        except Exception as e:
+            return f"获取板块历史行情失败: {e}"
+
+    def find_related_sub_boards(self, board_name: str, max_results: int = 8) -> list[dict]:
+        """基于主板块的成分股，反向查找这些股票所属的其他概念板块，发现细分子板块"""
+        sub_boards = []
+        try:
+            # 先拿主板块的成分股代码
+            with bypass_proxy():
+                try:
+                    main_cons = ak.stock_board_concept_cons_em(symbol=board_name)
+                except Exception:
+                    main_cons = ak.stock_board_industry_cons_em(symbol=board_name)
+
+            if main_cons.empty or '代码' not in main_cons.columns:
+                return sub_boards
+
+            main_stock_codes = set(main_cons['代码'].tolist())
+
+            # 拿全部概念板块列表
+            concept_df = self.get_concept_board_list()
+            if concept_df.empty or '板块名称' not in concept_df.columns:
+                return sub_boards
+
+            # 遍历概念板块，找与主板块成分股有交集的
+            candidate_boards = []
+            for _, row in concept_df.iterrows():
+                concept_name = row['板块名称']
+                if concept_name == board_name:
+                    continue
+                candidate_boards.append({
+                    'name': concept_name,
+                    'change_pct': row.get('涨跌幅', 0),
+                })
+
+            # 为了控制速度，只从跟关键词有弱关联的或涨跌幅靠前的板块里抽样检查
+            # 先按涨跌幅绝对值排序（活跃板块优先）
+            try:
+                candidate_boards.sort(key=lambda x: abs(float(x.get('change_pct', 0) or 0)), reverse=True)
+            except Exception:
+                pass
+
+            checked = 0
+            for candidate in candidate_boards[:60]:
+                if checked >= max_results:
+                    break
+                try:
+                    with bypass_proxy():
+                        cons = ak.stock_board_concept_cons_em(symbol=candidate['name'])
+                    if cons.empty or '代码' not in cons.columns:
+                        continue
+                    overlap_codes = main_stock_codes & set(cons['代码'].tolist())
+                    overlap_ratio = len(overlap_codes) / max(len(main_stock_codes), 1)
+                    if overlap_ratio >= 0.15:  # 至少 15% 成分股重叠
+                        sub_boards.append({
+                            'name': candidate['name'],
+                            'type': '概念板块',
+                            'overlap_count': len(overlap_codes),
+                            'overlap_ratio': f"{overlap_ratio:.0%}",
+                            'change_pct': candidate['change_pct'],
+                        })
+                        checked += 1
+                except Exception:
+                    continue
+
+        except Exception:
+            pass
+        return sub_boards
+
+    def get_board_analysis_context(self, board_name: str, board_type: str = "行业板块",
+                                    sub_boards: list[dict] = None) -> str:
+        """组装板块分析上下文，含主板块走势 + 成分股 + 关联子板块数据"""
+        context = f"# 板块诊断: {board_name} ({board_type})\n\n"
+
+        context += "## 1. 板块近期走势 (近10个交易日)\n"
+        context += self.get_board_history(board_name, board_type) + "\n\n"
+
+        context += "## 2. 板块核心成分股（按涨跌幅排序 Top10）\n"
+        context += self.get_board_constituents(board_name, board_type) + "\n\n"
+
+        # 关联子板块数据
+        if sub_boards:
+            context += "## 3. 关联细分子板块一览\n"
+            context += "以下是与主板块成分股高度重叠的细分概念板块：\n\n"
+            context += "| 子板块名称 | 重叠股票数 | 重叠比例 | 今日涨跌幅 |\n"
+            context += "|---|---|---|---|\n"
+            for sb in sub_boards:
+                context += f"| {sb['name']} | {sb['overlap_count']} | {sb['overlap_ratio']} | {sb['change_pct']}% |\n"
+            context += "\n"
+
+            # 取前3个关联度最高的子板块，拉取它们的走势
+            for sb in sub_boards[:3]:
+                context += f"### 子板块: {sb['name']} 近期走势\n"
+                context += self.get_board_history(sb['name'], '概念板块', limit=5) + "\n\n"
+
+        return context
+
 if __name__ == "__main__":
     fetcher = AShareDataFetcher()
     print(fetcher.get_full_analysis_context("600519"))
