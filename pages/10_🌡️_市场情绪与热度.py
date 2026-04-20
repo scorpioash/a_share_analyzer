@@ -1,11 +1,27 @@
 import streamlit as st
-import pandas as pd
-from data_fetcher import AShareDataFetcher
+import os
+import sys
+
+# 注入根目录路径
+sys.path.append(os.path.abspath("."))
+
+from visual_style import inject_premium_style, show_error_clean
+from market_monitor import render_market_monitor
+
+# --- 注入视觉与监控 ---
+inject_premium_style()
 
 if 'fetcher' not in st.session_state:
+    from data_fetcher import AShareDataFetcher
     st.session_state['fetcher'] = AShareDataFetcher()
 
 fetcher = st.session_state['fetcher']
+
+# 渲染侧边栏市场心跳仪表盘
+try:
+    render_market_monitor(fetcher)
+except Exception as e:
+    show_error_clean("市场监控组件加载失败", e)
 
 st.title("🌡️ 市场情绪与热度")
 st.markdown("监控全市场散户关注度与赚钱效应，判断大盘冰点与高潮。")
