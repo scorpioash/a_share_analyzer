@@ -6,7 +6,7 @@ from llm_analyzer import LLMAnalyzer
 
 dotenv.load_dotenv()
 
-st.set_page_config(page_title="A股智能数据终端", layout="centered", page_icon="📈")
+st.set_page_config(page_title="A股全维度智能投研终端", layout="centered", page_icon="📈")
 
 # 隐藏 Streamlit 报错信息下方的 "Copy / Ask Google / Ask ChatGPT" 链接
 st.markdown("""
@@ -25,7 +25,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("🏠 A 股智能数据终端 · 首页")
+st.title("🏠 A 股全维度智能投研终端")
 
 # 初始化组件
 def get_fetcher():
@@ -103,15 +103,41 @@ analyzer = LLMAnalyzer()
 st.sidebar.info(f"当前启用的底层模型: **{analyzer.provider.upper()}**")
 
 # ============== 主界面：首页 ==============
-st.markdown("### 欢迎来到极简 A 股数据终端大本营")
-st.markdown("通过左侧边栏导航，畅享从大盘行情到个股深度拆解的全套数据体系。")
-
-st.info("👈 请点击左侧边栏的页面进行浏览。目前支持：\n- **智能诊股**：结合AI的个股级深度剖析\n- **板块分析**：结合AI的子板块拆解预判\n- 更多行情与基本面数据模块正在陆续开放...")
+st.markdown("""  
+> 覆盖 **行情 · 资金 · 板块 · 基本面 · 资讯 · 情绪** 六大维度，辅以 AI 深度推演，  
+> 为你打造一站式 A 股投研决策中枢。  
+""")
 
 st.markdown("---")
-st.markdown("#### 🚀 快速开始")
-cola, colb = st.columns(2)
-with cola:
-    st.page_link("pages/1_🔍_智能诊股.py", label="体验智能诊股", icon="🔍")
-with colb:
-    st.page_link("pages/2_📊_板块分析.py", label="体验板块分析", icon="📊")
+
+# 功能导航卡片
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.markdown("##### 🔍 智能诊股")
+    st.caption("输入股票名称或代码，AI 结合你的策略深度研判")
+    st.page_link("pages/1_🔍_智能诊股.py", label="进入诊股", icon="🔍")
+with col2:
+    st.markdown("##### 📊 板块分析")
+    st.caption("挖掘行业与概念板块轮动机会，拆解子板块")
+    st.page_link("pages/2_📊_板块分析.py", label="进入板块", icon="📊")
+with col3:
+    st.markdown("##### 📈 行情中心")
+    st.caption("主板/创业板/科创板/北交所 全市场实时行情")
+    st.page_link("pages/3_📈_行情中心.py", label="查看行情", icon="📈")
+
+col4, col5, col6 = st.columns(3)
+with col4:
+    st.markdown("##### 🔥 盘口异动")
+    st.caption("涨跌停股池、盘中异动信号、板块异动监控")
+    st.page_link("pages/4_🔥_盘口异动.py", label="捕捉异动", icon="🔥")
+with col5:
+    st.markdown("##### 🐉 龙虎榜")
+    st.caption("跟踪游资席位与机构资金动向")
+    st.page_link("pages/7_🐉_龙虎榜与资金流.py", label="查看龙虎榜", icon="🐉")
+with col6:
+    st.markdown("##### 🌡️ 市场情绪")
+    st.caption("散户热度排行、全市场赚钱效应温度计")
+    st.page_link("pages/10_🌡️_市场情绪与热度.py", label="感知情绪", icon="🌡️")
+
+st.markdown("---")
+st.caption("⚠️ 免责声明：本系统所有的行情推演及 AI 回复仅作为技术测试与个人逻辑复盘，不构成任何投资建议。股市有风险，交易需谨慎！")
