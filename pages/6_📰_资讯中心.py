@@ -1,10 +1,24 @@
 import streamlit as st
-from data_fetcher import AShareDataFetcher
+import os
+import sys
+
+# 注入根目录路径
+sys.path.append(os.path.abspath("."))
+
+from visual_style import inject_premium_style, show_error_clean
+from market_monitor import render_market_monitor
+
+# --- 注入视觉与监控 ---
+inject_premium_style()
 
 if 'fetcher' not in st.session_state:
+    from data_fetcher import AShareDataFetcher
     st.session_state['fetcher'] = AShareDataFetcher()
 
 fetcher = st.session_state['fetcher']
+
+# 渲染侧边栏市场心跳仪表盘
+render_market_monitor(fetcher)
 
 st.title("📰 资讯中心")
 st.markdown("全球财经快讯及个股负面/利好消息监控。")
