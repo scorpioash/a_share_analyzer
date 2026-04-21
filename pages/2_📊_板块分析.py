@@ -45,7 +45,7 @@ if st.button("搜索板块", key="btn_board_search"):
 if 'board_results' in st.session_state and st.session_state['board_results']:
     results = st.session_state['board_results']
     
-    options = [f"{r['name']} ({r['type']}) | 涨跌幅: {r['change_pct']}%" for r in results]
+    options = [f"{r['name']} ({r['type']})" for r in results]
     selected_idx = st.selectbox("选择要诊断的板块：", range(len(options)), format_func=lambda i: options[i], key="board_select")
     
     selected = results[selected_idx]
@@ -59,12 +59,14 @@ if 'board_results' in st.session_state and st.session_state['board_results']:
     if 'last_board_analysis' not in st.session_state:
         st.session_state['last_board_analysis'] = None
 
-    # If we have a stored analysis, display it immediately
+    # If we have a stored analysis, display it immediately in a clean container
     if st.session_state['last_board_analysis']:
         res = st.session_state['last_board_analysis']
-        st.success("恢复上次板块诊断结论：")
-        st.markdown(f"### 【{res['name']} - {res['type']}】")
+        st.markdown(f"### 🎯 【{res['name']} - {res['type']}】深度诊断报告")
         st.markdown(res['result'])
+        if st.button("🧹 清除诊断结果", key="btn_clear_analysis"):
+            st.session_state['last_board_analysis'] = None
+            st.rerun()
         st.divider()
 
     if st.button("🚀 开始板块诊断", key="btn_board_analyze"):
