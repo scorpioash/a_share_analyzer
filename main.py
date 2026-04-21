@@ -58,6 +58,17 @@ def main():
         stocks_input = os.getenv("STOCK_LIST", "").strip()
         
     if not stocks_input:
+        if os.getenv("GITHUB_ACTIONS"):
+            print("\n" + "!"*60)
+            print("🚨 [GITHUB ACTIONS 配置错误] 未检测到 STOCK_LIST！")
+            print("请按以下步骤操作：")
+            print("1. 前往 GitHub 仓库 -> Settings -> Secrets and variables -> Actions")
+            print("2. 点击 'New repository secret'，名称设为 STOCK_LIST")
+            print("3. 内容通过逗号分隔，如: 600519,000001,sz002594")
+            print("!"*60 + "\n")
+            import sys
+            sys.exit(1)
+            
         print("\n[环境提示] 未在命令或 .env 中检测到指定目标。")
         stocks_input = input("👉 请手动输入你想要分析的 A 股代码 (逗号分隔，例如 600519,sz002594): ").strip()
         
