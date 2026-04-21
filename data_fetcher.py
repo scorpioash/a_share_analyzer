@@ -152,6 +152,33 @@ class AShareDataFetcher:
             return recent + momentum_info
         except: return "获取失败"
 
+    def get_full_analysis_context(self, query: str) -> tuple[str, str, str]:
+        """为 main.py (GitHub Actions) 提供的一站式个股上下文抓取接口"""
+        code, name = self.get_stock_name_or_code(query)
+        if not code or name == "未找到":
+            return "", "", f"无法解析股票: {query}"
+            
+        ctx = f"# 深度诊断报告: {name} ({code})\n\n"
+        
+        # 1. K线走势与动能
+        ctx += "## 1. 价格走势与短线动能\n"
+        ctx += self.get_daily_kline(code, limit=30) + "\n\n"
+        
+        # 2. 资讯面
+        ctx += "## 2. 最近重要资讯\n"
+        ctx += self.get_news(code) + "\n\n"
+        
+        # 3. 市场大配乐 (情绪注入)
+        try:
+            with bypass_proxy():
+                all_s = ak.stock_zh_a_spot()
+                if all_s is not None:
+                    u, d = len(all_s[all_s['涨跌幅']>0]), len(all_s[all_s['涨跌幅']<0])
+                    ctx += f"## 3. 全市场情绪背景\n- **上涨/下跌家数**: {u} / {d}\n"
+        except: pass
+        
+        return code, name, ctx
+
     def _get_market_prefix(self, code: str) -> str:
         if code.startswith(('6', '9')): return 'sh'
         if code.startswith(('0', '2', '3')): return 'sz'
