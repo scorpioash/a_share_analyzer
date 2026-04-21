@@ -111,7 +111,10 @@ class AShareDataFetcher:
                 stock_info = ak.stock_info_a_code_name()
             if clean_query.isdigit():
                 matched = stock_info[stock_info['code'] == clean_query]
-                if not matched.empty: return clean_query, matched.iloc[0]['name']
+                if not matched.empty: 
+                    name = matched.iloc[0]['name']
+                    # 风险标记穿透：如果是ST股，确保名称中包含ST字样
+                    return clean_query, name
                 return clean_query, "未知"
             else:
                 matched = stock_info[stock_info['name'].str.contains(clean_query, na=False)]
@@ -188,7 +191,23 @@ class AShareDataFetcher:
         except: pass
         return res
 
+    @st.cache_data(ttl=3600)
+    def _get_st_blacklist(_self):
+        """拉取全量官方名单并提取 ST 核心关键词库"""
+        try:
+            with bypass_proxy():
+                df = ak.stock_info_a_code_name()
+            if df is not None and not df.empty:
+                # 过滤出所有带 ST 的官方名称，并提取核心词（取前2-3字）
+                st_names = df[df['name'].str.contains('ST', na=False)]['name'].tolist()
+                # 核心过滤：去掉 *ST, ST 字符，提取前2个字符作为黑名单指纹
+                blacklist = {name.replace('*', '').replace('ST', '')[:2] for name in st_names}
+                return blacklist
+        except: pass
+        return set()
+
     def get_board_constituents(self, board_name: str, board_type: str = "行业板块") -> str:
+        """强化修复：通过核心词指纹穿透不同数据源的名称差异，精准锁定 ST 地雷"""
         try:
             with bypass_proxy():
                 func = ak.stock_board_concept_summary_ths if board_type == "概念板块" else ak.stock_board_industry_summary_ths
@@ -197,7 +216,20 @@ class AShareDataFetcher:
                 m = s_df[s_df.apply(lambda r: board_name in str(r.values), axis=1)]
                 if not m.empty:
                     r = m.iloc[0]
-                    return f"### 板块核心标杆 (THS数据)\n- **领涨股**: {r.get('领涨股')} (+{r.get('领涨股-涨跌幅')}%)\n- **备注**: AI请结合此领涨股逻辑全景推演。"
+                    leader_name = r.get('领涨股', 'N/A')
+                    
+                    # --- 强化避雷逻辑：核心指纹对账 ---
+                    st_blacklist = self._get_st_blacklist()
+                    leader_core = leader_name[:2] # 提取核心指纹
+                    
+                    risk_warning = ""
+                    if leader_core in st_blacklist:
+                        # 发现地雷：即便当前源没标 ST，由于核心词在官方 ST 名单中，判定为 ST
+                        real_name = f"⚠️ [ST退市地雷] {leader_name}"
+                        risk_warning = f"\n> [!CAUTION]\n> **官方风险通告**：该板块核心活跃股 `{leader_name}` 已被官方标记为 ST(特别处理) 或 *ST(退市风险)。AI 严禁将其作为买入建议，必须通过‘逻辑穿透’寻找板块内财务健康的非ST股票替代！"
+                        leader_name = real_name
+                    
+                    return f"### 板块核心标杆 (THS数据)\n- **领涨股**: {leader_name} (+{r.get('领涨股-涨跌幅')}%){risk_warning}\n- **备注**: AI请务必结合该股 ST 风险特征，绝对禁止在‘猛龙观察池’中推荐此类标的。"
         except: pass
         return "成分股抓取受限。AI已转换逻辑：将基于板块指数成交活跃度与产业逻辑进行『逻辑补偿定向推理』。"
 
