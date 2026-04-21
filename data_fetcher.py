@@ -19,17 +19,93 @@ except AttributeError:
 
 @contextlib.contextmanager
 def bypass_proxy():
-    """临时隔离系统的全局代理环境变量，保护国内直连数据不被代理劫持打断"""
+    """临时隔离系统的全局/底层代理，确保国内直连抓取数据，而不会影响主线程调取跨境大模型"""
     proxy_keys = ['http_proxy', 'https_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'all_proxy', 'ALL_PROXY']
-    saved = {}
+    saved_env = {}
     for k in proxy_keys:
         if k in os.environ:
-            saved[k] = os.environ.pop(k)
+            saved_env[k] = os.environ.pop(k)
+            
+    # 强制让 requests / urllib3 忽略所有 Windows 注册表的系统代理
+    saved_no_proxy = os.environ.get('NO_PROXY')
+    saved_no_proxy_lower = os.environ.get('no_proxy')
+    os.environ['NO_PROXY'] = '*'
+    os.environ['no_proxy'] = '*'
+
+    # 暴力拦截 urllib.request 去读取 Windows 系统代理设置
+    import urllib.request
+    original_getproxies = urllib.request.getproxies
+    urllib.request.getproxies = lambda: {}
+    
+    # 彻底物理拦截 requests 库底层的代理合并逻辑，防止内部缓存代理设置
+    import requests
+    original_merge_env = requests.Session.merge_environment_settings
+    original_request = requests.Session.request
+    
+    def proxy_blocking_merge(self, url, proxies, stream, verify, cert):
+        settings = original_merge_env(self, url, proxies, stream, verify, cert)
+        settings['proxies'] = {"http": None, "https": None}
+        return settings
+        
+    def user_agent_request(self, method, url, **kwargs):
+        headers = kwargs.get('headers') or {}
+        if 'User-Agent' not in headers:
+            headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36'
+        kwargs['headers'] = headers
+        return original_request(self, method, url, **kwargs)
+        
+    requests.Session.merge_environment_settings = proxy_blocking_merge
+    requests.Session.request = user_agent_request
+    
+    # 【终极杀招】：拦截 socket.getaddrinfo 解决 Fake-IP 导致的连接截断问题
+    # 很多代理软件会在 OS 层下发 Fake-IP（如 198.18.0.x），导致代码直连时无法路由。
+    # 这里我们强制使用阿里公共 DNS (223.5.5.5) 为东方财富域名获取真实物理 IP，绕过操作系统 DNS 污染。
+    import socket
+    import json
+    original_getaddrinfo = socket.getaddrinfo
+    
+    def patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        if 'eastmoney' in host or '10jqka' in host:
+            try:
+                url = f"http://223.5.5.5/resolve?name={host}&type=1"
+                req = urllib.request.Request(url, headers={'Accept': 'application/dns-json'})
+                # 确保 DNS 查询本身也不走代理
+                req.set_proxy('', 'http')
+                req.set_proxy('', 'https')
+                with urllib.request.urlopen(req, timeout=3) as response:
+                    res = json.loads(response.read().decode('utf-8'))
+                    if res.get('Status') == 0 and 'Answer' in res:
+                        for answer in res['Answer']:
+                            if answer['type'] == 1:
+                                real_ip = answer['data']
+                                # 返回标准的 socket addrinfo 结构
+                                return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, '', (real_ip, port))]
+            except Exception:
+                pass
+        return original_getaddrinfo(host, port, family, type, proto, flags)
+        
+    socket.getaddrinfo = patched_getaddrinfo
+    
     try:
         yield
     finally:
-        for k, v in saved.items():
+        for k, v in saved_env.items():
             os.environ[k] = v
+            
+        if saved_no_proxy is not None:
+            os.environ['NO_PROXY'] = saved_no_proxy
+        else:
+            os.environ.pop('NO_PROXY', None)
+            
+        if saved_no_proxy_lower is not None:
+            os.environ['no_proxy'] = saved_no_proxy_lower
+        else:
+            os.environ.pop('no_proxy', None)
+            
+        urllib.request.getproxies = original_getproxies
+        requests.Session.merge_environment_settings = original_merge_env
+        requests.Session.request = original_request
+        socket.getaddrinfo = original_getaddrinfo
 
 class AShareDataFetcher:
     def __init__(self):
@@ -60,11 +136,15 @@ class AShareDataFetcher:
     def get_daily_kline(self, code: str, limit: int = 30) -> str:
         try:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
+            prefix = self._get_market_prefix(clean_code)
+            symbol_tx = f"{prefix}{clean_code}"
             with bypass_proxy():
-                df = ak.stock_zh_a_hist(symbol=clean_code, period="daily", adjust="qfq")
+                df = ak.stock_zh_a_hist_tx(symbol=symbol_tx, start_date='2024-01-01', end_date=datetime.datetime.now().strftime('%Y-%m-%d'))
             if df.empty:
                 return "暂无K线数据"
             
+            # 腾讯源列名: date, open, close, high, low, amount
+            df = df.rename(columns={'date': '日期', 'open': '开盘', 'close': '收盘', 'high': '最高', 'low': '最低', 'amount': '成交量'})
             df = df.tail(limit).copy()
             df['日期'] = pd.to_datetime(df['日期']).dt.strftime('%Y-%m-%d')
             df['MA5'] = df['收盘'].rolling(window=5, min_periods=1).mean().round(2)
@@ -72,7 +152,7 @@ class AShareDataFetcher:
             df['MA20'] = df['收盘'].rolling(window=20, min_periods=1).mean().round(2)
             
             recent_df = df.tail(5)
-            headers = ["日期", "开盘", "收盘", "最高", "最低", "成交量", "成交额", "振幅", "涨跌幅", "涨跌额", "换手率", "MA5", "MA10", "MA20"]
+            headers = ["日期", "开盘", "收盘", "最高", "最低", "成交量", "MA5", "MA10", "MA20"]
             available_cols = [h for h in headers if h in recent_df.columns]
                     
             if not available_cols:
@@ -100,28 +180,41 @@ class AShareDataFetcher:
     def get_news(self, code: str) -> str:
         try:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
-            df_empty = True
             news_lines = []
             
-            # Temporary string storage override to avoid PyArrow regex \u error
             import pandas as pd
             orig_storage = pd.options.mode.string_storage
             try:
                 pd.options.mode.string_storage = "python"
                 with bypass_proxy():
-                    df = ak.stock_news_em(symbol=clean_code)
-                df_empty = df.empty
-                if not df_empty:
-                    for _, row in df.head(8).iterrows():
-                        link = row.get('新闻链接', '')
-                        title = row.get('新闻标题', '未知标题')
-                        time_str = row.get('新闻时间', '')
-                        if link:
-                            news_lines.append(f"- [{time_str}] [{title}]({link})")
-                        else:
-                            news_lines.append(f"- [{time_str}] {title}")
+                    # 优先尝试东方财富源，失败则静默跳过
+                    try:
+                        df = ak.stock_news_em(symbol=clean_code)
+                        if not df.empty:
+                            for _, row in df.head(8).iterrows():
+                                link = row.get('新闻链接', '')
+                                title = row.get('新闻标题', '未知标题')
+                                time_str = row.get('新闻时间', '')
+                                if link:
+                                    news_lines.append(f"- [{time_str}] [{title}]({link})")
+                                else:
+                                    news_lines.append(f"- [{time_str}] {title}")
+                    except Exception:
+                        pass
+                    
+                    # 如果EM源失败，尝试同花顺全球快讯作为补充
+                    if not news_lines:
+                        try:
+                            df_global = ak.stock_info_global_ths()
+                            if df_global is not None and not df_global.empty:
+                                for _, row in df_global.head(5).iterrows():
+                                    title = row.get('内容', row.get('title', '未知'))
+                                    time_str = row.get('时间', row.get('发布时间', ''))
+                                    news_lines.append(f"- [{time_str}] {str(title)[:80]}")
+                        except Exception:
+                            pass
             except Exception as inner_e:
-                print(f"AkShare新闻接口内部错误: {inner_e}")
+                print(f"新闻接口内部错误: {inner_e}")
             finally:
                 pd.options.mode.string_storage = orig_storage
                 
@@ -132,19 +225,24 @@ class AShareDataFetcher:
             return f"获取新闻失败: {e}"
 
     def get_realtime_quotes(self, market: str = "主板") -> "pd.DataFrame":
-        """获取各类市场的实时行情榜单"""
+        """获取各类市场的实时行情榜单 (使用新浪源，兼容代理环境)"""
         try:
             with bypass_proxy():
-                if market == "主板":
-                    df = ak.stock_zh_a_spot_em()
-                elif market == "科创板":
-                    df = ak.stock_kc_a_spot_em()
-                elif market == "创业板":
-                    df = ak.stock_cy_a_spot_em()
-                elif market == "北交所":
-                    df = ak.stock_bj_a_spot_em()
-                else:
-                    return None
+                df = ak.stock_zh_a_spot()
+            if df is None or df.empty:
+                return None
+            # 新浪源列名映射
+            col_map = {'代码': '代码', '名称': '名称', '最新价': '最新价', '涨跌幅': '涨跌幅'}
+            # 按市场过滤
+            df['代码'] = df['代码'].astype(str)
+            if market == "主板":
+                df = df[df['代码'].str.match(r'^(sh6|sz0)')]
+            elif market == "科创板":
+                df = df[df['代码'].str.contains('688')]
+            elif market == "创业板":
+                df = df[df['代码'].str.match(r'^sz30')]
+            elif market == "北交所":
+                df = df[df['代码'].str.match(r'^bj')]
             return df
         except Exception as e:
             print(f"获取实时行情异常: {e}")
@@ -239,12 +337,14 @@ class AShareDataFetcher:
             return None
 
     def get_global_news(self) -> "pd.DataFrame":
-        """获取全球财经快讯"""
+        """获取全球财经快讯 (优先同花顺源)"""
         try:
             with bypass_proxy():
-                df = ak.stock_info_global_em()
+                try:
+                    df = ak.stock_info_global_ths()
+                except Exception:
+                    df = ak.stock_info_global_sina()
             if df is not None and not df.empty:
-                # 兼容不同版本的列名，并统一映射
                 cols_map = {'文章连接': 'url', '文章链接': 'url', '时间': '发布时间'}
                 df = df.rename(columns={k: v for k, v in cols_map.items() if k in df.columns})
             return df
@@ -297,18 +397,23 @@ class AShareDataFetcher:
             return None
 
     def get_historical_trend(self, code: str, days: int = 250) -> str:
-        """抽取近 N 个交易日的历史行情核心趋势微缩版，赋予 AI 长线记忆"""
+        """抽取近 N 个交易日的历史行情核心趋势微缩版，赋予 AI 长线记忆 (腾讯源)"""
         try:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
+            prefix = self._get_market_prefix(clean_code)
+            symbol_tx = f"{prefix}{clean_code}"
             import datetime
             end_date = datetime.datetime.now()
-            start_date = end_date - datetime.timedelta(days=days * 2) # 多取一些日子确保有足够交易日
+            start_date = end_date - datetime.timedelta(days=days * 2)
             
             with bypass_proxy():
-                df = ak.stock_zh_a_hist(symbol=clean_code, period="daily", start_date=start_date.strftime("%Y%m%d"), end_date=end_date.strftime("%Y%m%d"), adjust="qfq")
+                df = ak.stock_zh_a_hist_tx(symbol=symbol_tx, start_date=start_date.strftime('%Y-%m-%d'), end_date=end_date.strftime('%Y-%m-%d'))
             
             if df.empty:
                 return "暂无历史行情数据"
+            
+            # 腾讯源列名映射
+            df = df.rename(columns={'date': '日期', 'open': '开盘', 'close': '收盘', 'high': '最高', 'low': '最低', 'amount': '成交量'})
             
             recent_df = df.tail(days)
             if recent_df.empty:
@@ -317,17 +422,15 @@ class AShareDataFetcher:
             max_price = recent_df['最高'].max()
             min_price = recent_df['最低'].min()
             current_price = recent_df.iloc[-1]['收盘']
-            avg_turnover = recent_df['换手率'].mean() if '换手率' in recent_df.columns else 0
             
             trend_md = (
                 f"- **周期统计**: 过去 {len(recent_df)} 个交易日\n"
                 f"- **区间最高**: {max_price}，**区间最低**: {min_price} (当前收盘价 {current_price})\n"
                 f"- **当前股价位置**: 位于近区间的 {((current_price - min_price) / (max_price - min_price + 0.001)) * 100:.1f}%\n"
-                f"- **日均换手率**: {avg_turnover:.2f}%\n"
             )
-            # 抽样几条关键日期的涨跌幅供 LLM 判断趋势
-            sample_df = recent_df.iloc[::20] # 每20天抽样一次
-            sample_strs = [f"{row['日期'][:10]}收:{row['收盘']} 幅:{row['涨跌幅']}%" for idx, row in sample_df.iterrows()]
+            # 抽样几条关键日期供 LLM 判断趋势
+            sample_df = recent_df.iloc[::20]
+            sample_strs = [f"{str(row['日期'])[:10]}收:{row['收盘']}" for idx, row in sample_df.iterrows()]
             trend_md += f"- **走势抽样速览**: {', '.join(sample_strs)}\n"
             return trend_md
         except Exception as e:
@@ -793,22 +896,69 @@ class AShareDataFetcher:
             return None
 
     def get_industry_board_list(self) -> "pd.DataFrame":
-        """获取东方财富行业板块列表"""
+        """获取行业板块列表并补充涨跌幅（同花顺源，兼容代理环境）"""
+        try:
+            with bypass_proxy():
+                # 获取基础列表
+                df_name = ak.stock_board_industry_name_ths()
+                # 获取涨跌幅汇总
+                df_summary = ak.stock_board_industry_summary_ths()
+                
+                if df_name is not None and not df_name.empty:
+                    df_name = df_name.rename(columns={'name': '板块名称', 'code': '板块代码'})
+                    if df_summary is not None and not df_summary.empty:
+                        # 尝试通过板块名称关联
+                        # 同花顺的summary接口列名可能是中文
+                        # 映射列名：'板块' -> '板块名称', '涨跌幅' -> '涨跌幅'
+                        df_summary = df_summary.rename(columns={
+                            df_summary.columns[1]: '板块名称', 
+                            df_summary.columns[2]: '涨跌幅'
+                        })
+                        df = pd.merge(df_name, df_summary[['板块名称', '涨跌幅']], on='板块名称', how='left')
+                        return df
+                    return df_name
+        except Exception as e:
+            print(f"同花顺行业板块获取/合并失败: {e}")
+            
+        # 降级至东方财富
         try:
             with bypass_proxy():
                 df = ak.stock_board_industry_name_em()
-            return df
-        except Exception as e:
-            return pd.DataFrame()
+                if df is not None and not df.empty and '板块名称' in df.columns:
+                    return df
+        except Exception:
+            pass
+        return pd.DataFrame()
 
     def get_concept_board_list(self) -> pd.DataFrame:
-        """获取东方财富概念板块列表"""
+        """获取概念板块列表并补充涨跌幅（同花顺源，兼容代理环境）"""
+        try:
+            with bypass_proxy():
+                df_name = ak.stock_board_concept_name_ths()
+                df_summary = ak.stock_board_concept_summary_ths()
+                
+                if df_name is not None and not df_name.empty:
+                    df_name = df_name.rename(columns={'name': '板块名称', 'code': '板块代码'})
+                    if df_summary is not None and not df_summary.empty:
+                        df_summary = df_summary.rename(columns={
+                            df_summary.columns[1]: '板块名称', 
+                            df_summary.columns[2]: '涨跌幅'
+                        })
+                        df = pd.merge(df_name, df_summary[['板块名称', '涨跌幅']], on='板块名称', how='left')
+                        return df
+                    return df_name
+        except Exception:
+            pass
+        # 降级至东方财富
         try:
             with bypass_proxy():
                 df = ak.stock_board_concept_name_em()
-            return df
+                if df is not None and not df.empty and '板块名称' in df.columns:
+                    return df
         except Exception as e:
+            print(f"概念板块获取失败: {e}")
             return pd.DataFrame()
+        return pd.DataFrame()
 
     def search_board(self, query: str) -> list[dict]:
         """根据关键词模糊搜索板块（行业+概念），返回匹配结果列表"""
@@ -845,7 +995,8 @@ class AShareDataFetcher:
         return results
 
     def get_board_constituents(self, board_name: str, board_type: str = "行业板块", top_n: int = 10) -> str:
-        """获取板块成分股（取涨跌幅前 top_n）"""
+        """获取板块成分股（优先EM，失败时用THS板块概要中的领涨股信息）"""
+        # 尝试东方财富源
         try:
             with bypass_proxy():
                 if board_type == "概念板块":
@@ -853,54 +1004,91 @@ class AShareDataFetcher:
                 else:
                     df = ak.stock_board_industry_cons_em(symbol=board_name)
 
-            if df.empty:
-                return "暂无成分股数据"
-
-            # 统一列名处理
-            cols_map = {'代码': '代码', '名称': '名称', '最新价': '最新价', '涨跌幅': '涨跌幅',
-                        '涨跌额': '涨跌额', '成交量': '成交量', '成交额': '成交额', '换手率': '换手率'}
-            available = [c for c in cols_map.keys() if c in df.columns]
-
-            if '涨跌幅' in df.columns:
-                df = df.sort_values('涨跌幅', ascending=False)
-
-            display_df = df[available].head(top_n)
-            return display_df.to_markdown(index=False)
-        except Exception as e:
-            return f"获取成分股失败: {e}"
+            if not df.empty:
+                cols_map = {'代码': '代码', '名称': '名称', '最新价': '最新价', '涨跌幅': '涨跌幅',
+                            '涨跌额': '涨跌额', '成交量': '成交量', '成交额': '成交额', '换手率': '换手率'}
+                available = [c for c in cols_map.keys() if c in df.columns]
+                if '涨跌幅' in df.columns:
+                    df = df.sort_values('涨跌幅', ascending=False)
+                display_df = df[available].head(top_n)
+                return display_df.to_markdown(index=False)
+        except Exception:
+            pass
+        
+        # 降级：使用同花顺板块概要获取领涨股等关键信息
+        try:
+            with bypass_proxy():
+                if board_type == "概念板块":
+                    summary_df = ak.stock_board_concept_summary_ths()
+                else:
+                    summary_df = ak.stock_board_industry_summary_ths()
+            if summary_df is not None and not summary_df.empty:
+                matched = summary_df[summary_df.apply(lambda r: board_name in str(r.values), axis=1)]
+                if not matched.empty:
+                    row = matched.iloc[0]
+                    info = f"| 板块 | 涨跌幅 | 领涨股 | 领涨股涨幅 |\n|---|---|---|---|\n"
+                    info += f"| {board_name} | {row.get('涨跌幅', 'N/A')}% | {row.get('领涨股', 'N/A')} | {row.get('领涨股-涨跌幅', 'N/A')}% |\n"
+                    return info
+        except Exception:
+            pass
+        
+        return "成分股数据暂时无法获取（数据源受限），AI将基于板块历史走势与产业逻辑进行推演。"
 
     def get_board_history(self, board_name: str, board_type: str = "行业板块", limit: int = 250) -> str:
-        """获取板块近期历史行情，抽样汇总防止token溢出"""
+        """获取板块近期历史行情（同花顺指数优先，兼容代理环境）"""
+        # 优先使用同花顺板块指数
+        try:
+            import datetime
+            end_date = datetime.datetime.now().strftime('%Y%m%d')
+            start_date = (datetime.datetime.now() - datetime.timedelta(days=limit * 2)).strftime('%Y%m%d')
+            with bypass_proxy():
+                if board_type == "概念板块":
+                    df = ak.stock_board_concept_index_ths(symbol=board_name, start_date=start_date, end_date=end_date)
+                else:
+                    df = ak.stock_board_industry_index_ths(symbol=board_name, start_date=start_date, end_date=end_date)
+            
+            if df is not None and not df.empty:
+                # THS列名: 日期, 开盘价, 最高价, 最低价, 收盘价, 成交量, 成交额
+                df = df.rename(columns={'开盘价': '开盘', '最高价': '最高', '最低价': '最低', '收盘价': '收盘'})
+                recent_df = df.tail(limit)
+                if not recent_df.empty:
+                    max_price = recent_df['最高'].max()
+                    min_price = recent_df['最低'].min()
+                    current_price = recent_df.iloc[-1]['收盘']
+                    
+                    trend_md = (
+                        f"- **周期统计**: 过去 {len(recent_df)} 个交易日\n"
+                        f"- **区间最高**: {max_price}，**区间最低**: {min_price} (当前收盘价 {current_price})\n"
+                        f"- **当前位置**: 位于近区间的 {((current_price - min_price) / (max_price - min_price + 0.001)) * 100:.1f}%\n"
+                    )
+                    sample_df = recent_df.iloc[::20]
+                    sample_strs = [f"{str(row['日期'])[:10]}收:{row['收盘']}" for idx, row in sample_df.iterrows()]
+                    trend_md += f"- **走势关键点**: {', '.join(sample_strs)}\n"
+                    return trend_md
+        except Exception:
+            pass
+        
+        # 降级至东方财富
         try:
             with bypass_proxy():
                 if board_type == "概念板块":
                     df = ak.stock_board_concept_hist_em(symbol=board_name, period="日k", adjust="")
                 else:
                     df = ak.stock_board_industry_hist_em(symbol=board_name, period="日k", adjust="")
-
-            if df.empty:
-                return "暂无板块历史行情数据"
-
-            recent_df = df.tail(limit)
-            if recent_df.empty:
-                return "数据量不足"
-                
-            max_price = recent_df['最高'].max()
-            min_price = recent_df['最低'].min()
-            current_price = recent_df.iloc[-1]['收盘']
-            
-            trend_md = (
-                f"- **周期统计**: 过去 {len(recent_df)} 个交易日\n"
-                f"- **区间最高**: {max_price}，**区间最低**: {min_price} (当前收盘价 {current_price})\n"
-                f"- **当前位置**: 位于近区间的 {((current_price - min_price) / (max_price - min_price + 0.001)) * 100:.1f}%\n"
-            )
-            # 抽样
-            sample_df = recent_df.iloc[::20] # 每20天抽样一次
-            sample_strs = [f"{row['日期'][:10]}收:{row['收盘']} 幅:{row['涨跌幅']}%" for idx, row in sample_df.iterrows()]
-            trend_md += f"- **走势关键点**: {', '.join(sample_strs)}\n"
-            return trend_md
-        except Exception as e:
-            return f"获取板块历史行情失败: {e}"
+            if df is not None and not df.empty:
+                recent_df = df.tail(limit)
+                max_price = recent_df['最高'].max()
+                min_price = recent_df['最低'].min()
+                current_price = recent_df.iloc[-1]['收盘']
+                trend_md = (
+                    f"- **周期统计**: 过去 {len(recent_df)} 个交易日\n"
+                    f"- **区间最高**: {max_price}，**区间最低**: {min_price} (当前收盘价 {current_price})\n"
+                    f"- **当前位置**: 位于近区间的 {((current_price - min_price) / (max_price - min_price + 0.001)) * 100:.1f}%\n"
+                )
+                return trend_md
+        except Exception:
+            pass
+        return "板块历史行情数据暂时无法获取。"
 
     def find_related_sub_boards(self, board_name: str, max_results: int = 8) -> list[dict]:
         """基于主板块的成分股，反向查找这些股票所属的其他概念板块，发现细分子板块"""
@@ -980,7 +1168,7 @@ class AShareDataFetcher:
         constituents_md = self.get_board_constituents(board_name, board_type)
         context += constituents_md + "\n\n"
         
-        # 融入龙虎榜特征
+        # 融入龙虎榜特征（东方财富源，允许静默失败）
         context += "## 3. 板块近期龙虎榜活跃度\n"
         try:
             import datetime
@@ -990,22 +1178,19 @@ class AShareDataFetcher:
                 lhb_df = ak.stock_lhb_detail_em(start_date=start_str, end_date=today_str)
             if not lhb_df.empty and '名称' in lhb_df.columns:
                 board_cons = set()
-                if "暂无" not in constituents_md:
-                    # 粗略提取成分股名称
+                if "暂无" not in constituents_md and "无法获取" not in constituents_md:
                     import re
                     board_cons = set(re.findall(r'\|\s*\d+\s*\|\s*([^|]+?)\s*\|', constituents_md))
-                
-                # 检查上榜情况
                 lhb_names = set(lhb_df['名称'].tolist())
                 matches = board_cons.intersection(lhb_names)
                 if matches:
-                    context += f"今日龙虎榜中，该板块有以下核心成分股上榜游资/机构席位：{', '.join(matches)}\n\n"
+                    context += f"今日龙虎榜中，该板块有以下核心成分股上榜：{', '.join(matches)}\n\n"
                 else:
-                    context += "今日该板块的核心成分股暂未发现明显的龙虎榜交易异动。\n\n"
+                    context += "今日核心成分股未发现龙虎榜交易异动。\n\n"
             else:
-                context += "今日龙虎榜数据暂未收集到。\n\n"
-        except Exception as e:
-             context += "获取板块龙虎榜特征失败。\n\n"
+                context += "今日龙虎榜数据暂未获取到。\n\n"
+        except Exception:
+             context += "龙虎榜数据源暂时不可用。\n\n"
 
         # 关联子板块数据
         if sub_boards:
@@ -1051,31 +1236,44 @@ class AShareDataFetcher:
         except Exception:
             context += "板块技术极值扫描失败。\n"
 
+        # 加入市场整体情绪数据，防止 AI 产生“数据缺失”的错觉
+        try:
+             sentiment = self.get_market_sentiment()
+             if sentiment:
+                 context += "## 6. 全市场实时情绪参考\n"
+                 context += f"- **上涨/下跌家数**: {sentiment['up']} / {sentiment['down']}\n"
+                 context += f"- **全市场赚钱效应**: {sentiment['temperature']:.1f}%\n"
+                 context += f"- **全市场成交额**: {sentiment['volume']:.1f} 亿元\n\n"
+        except Exception:
+             pass
+
         return context
 
     def get_realtime_quotes(self, market_type: str) -> "pd.DataFrame":
-        """获取全市场实时行情数据并过滤"""
+        """获取全市场实时行情数据并过滤 (新浪源，兼容代理)"""
         try:
             with bypass_proxy():
-                import akshare as ak
-                df = ak.stock_zh_a_spot_em()
+                df = ak.stock_zh_a_spot()
                 if df is None or df.empty:
                     return None
             
-            # 代码补全 6 位
-            df['代码'] = df['代码'].astype(str).str.zfill(6)
+            df['代码'] = df['代码'].astype(str)
+            # 新浪源代码格式: sh600519, sz000001
+            # 提取纯数字代码用于过滤
+            df['_code'] = df['代码'].str.replace(r'^(sh|sz|bj)', '', regex=True)
             
             if market_type == "沪深主板":
-                # 沪主板: 600/601/603/605; 深主板: 000/001/002/003
-                return df[df['代码'].str.startswith(('600', '601', '603', '605', '000', '001', '002', '003'))]
+                result = df[df['_code'].str.startswith(('600', '601', '603', '605', '000', '001', '002', '003'))]
             elif market_type == "创业板":
-                return df[df['代码'].str.startswith(('300', '301'))]
+                result = df[df['_code'].str.startswith(('300', '301'))]
             elif market_type == "科创板":
-                return df[df['代码'].str.startswith('688')]
+                result = df[df['_code'].str.startswith('688')]
             elif market_type == "北交所":
-                return df[df['代码'].str.startswith(('8', '4', '9'))]
+                result = df[df['代码'].str.startswith('bj')]
+            else:
+                result = df
             
-            return df
+            return result.drop(columns=['_code'], errors='ignore')
         except Exception as e:
             print(f"获取实时行情失败: {e}")
             return None
@@ -1111,7 +1309,8 @@ class AShareDataFetcher:
 def _fetch_all_spot_cached():
     import akshare as ak
     try:
-        return ak.stock_zh_a_spot_em()
+        with bypass_proxy():
+            return ak.stock_zh_a_spot()
     except:
         return None
 
