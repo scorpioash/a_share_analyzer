@@ -98,7 +98,7 @@ def main():
         report_block = f"【{name} - {code}】\n{analysis_result}\n" + "-"*30
         overall_report.append(report_block)
         
-        print(f"[✓] {raw_query} 分析完成。")
+        print(f"[DONE] {raw_query} 分析完成。")
         print("\n" + report_block)
         
     # 3. 合并推送
