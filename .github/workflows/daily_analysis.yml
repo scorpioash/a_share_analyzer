@@ -44,4 +44,4 @@ jobs:
           # 股票池：如果手动点击了运行并输入了代码，优先使用输入的代码；否则使用 Secrets 里的配置
           STOCK_LIST: ${{ github.event.inputs.stocks || secrets.STOCK_LIST }}
         run: |
-          python main.py
+          python -u main.py
