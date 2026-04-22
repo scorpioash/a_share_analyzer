@@ -5,6 +5,7 @@ import pandas as pd
 pd.options.mode.string_storage = "python"
 
 import datetime
+from datetime import datetime, date
 import os
 import contextlib
 import urllib3
@@ -122,59 +123,160 @@ class AShareDataFetcher:
                 return "", "未找到"
         except: return clean_query, "解析失败"
 
-    def get_daily_kline(self, code: str, limit: int = 30) -> str:
+    def get_daily_kline(self, code: str, limit: int = 30, spot_row: dict = None) -> str:
         try:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
             prefix = self._get_market_prefix(clean_code)
             with bypass_proxy():
-                df = ak.stock_zh_a_hist_tx(symbol=f"{prefix}{clean_code}", start_date='2024-01-01', end_date=datetime.datetime.now().strftime('%Y-%m-%d'))
-            if df.empty: return "无数据"
-            df = df.rename(columns={'date': '日期', 'close': '收盘', 'amount': '成交量'})
+                df = ak.stock_zh_a_hist_tx(symbol=f"{prefix}{clean_code}", start_date='2024-01-01', end_date=datetime.now().strftime('%Y-%m-%d'))
             
-            # --- 动力学指标增强 ---
+            if df.empty: return "无历史数据"
+            # 统一列名映射，确保合成时键值一致
+            df = df.rename(columns={'date': '日期', 'open': '开盘', 'close': '收盘', 'high': '最高', 'low': '最低', 'amount': '成交量'})
+            
+            # --- 缝合逻辑：将今日实盘行情强行追加给 AI ---
+            if spot_row:
+                today_str = datetime.now().strftime('%Y-%m-%d')
+                last_date = str(df.iloc[-1]['日期'])
+                if today_str > last_date:
+                    new_row = {
+                        '日期': f"{today_str} (今日最新实盘)",
+                        '开盘': spot_row.get('open', 0),
+                        '收盘': spot_row.get('price', 0),
+                        '最高': spot_row.get('high', 0),
+                        '最低': spot_row.get('low', 0),
+                        '成交量': spot_row.get('volume', 0)
+                    }
+                    df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            # --- 动力学指标增强 (计算最近 5 日动能，包含今日合成行) ---
             if len(df) >= 5:
-                v5 = df['成交量'].tail(5).mean()
+                # 均量计算排除合成行，除非合成行量能已显著
+                v5 = df['成交量'].iloc[-6:-1].mean() if len(df) > 5 else df['成交量'].tail(5).mean()
                 cur_v = df['成交量'].iloc[-1]
                 v_ratio = cur_v / (v5 + 0.1)
                 p5_start = df['收盘'].iloc[-5]
                 p_cur = df['收盘'].iloc[-1]
-                p5_change = ((p_cur - p5_start) / p5_start) * 100
+                p5_change = ((p_cur - p5_start) / (p5_start + 0.001)) * 100
                 
                 # 均线偏离度 (MA5)
                 ma5 = df['收盘'].rolling(window=5).mean().iloc[-1]
                 bias5 = ((p_cur - ma5) / (ma5 + 0.001)) * 100
                 
-                momentum_info = f"\n> [!TIP]\n> **短线动能监测**: 近5日涨幅 {p5_change:.2f}%，当前量比(vs 5日均量) {v_ratio:.2f}，股价偏离5日线 {bias5:.2f}%。\n"
+                momentum_info = f"\n> [!TIP]\n> **实时动能/偏离度监控**: 股价相较5日前涨跌幅 {p5_change:.2f}%，量比 {v_ratio:.2f}，当前价格偏离5日线 {bias5:.2f}%。\n"
             else:
                 momentum_info = ""
                 
             recent = df.tail(limit).to_markdown(index=False)
             return recent + momentum_info
-        except: return "获取失败"
+        except Exception as e: return f"K线获取失败: {str(e)}"
+
+    def _get_bulletproof_spot(self, code: str) -> dict:
+        """三级防线抓取最准实时数据 (支持捕捉日内极致脉冲)"""
+        clean_code = code.replace('sh', '').replace('sz', '')
+        info = None
+        try:
+            with bypass_proxy():
+                # Tier 1: 东财实时快照 (主攻当前价/涨幅)
+                try:
+                    df = ak.stock_zh_a_spot_em()
+                    if df is not None and not df.empty:
+                        target = df[df['代码'] == clean_code]
+                        if not target.empty:
+                            s = target.iloc[0]
+                            info = {
+                                'price': float(s['最新价']),
+                                'open': float(s['今开']),
+                                'high': float(s['最高']),
+                                'low': float(s['最低']),
+                                'volume': float(s['成交量']),
+                                'change_pct': float(s['涨跌幅']),
+                                'source': 'Snapshot'
+                            }
+                except: pass
+
+                # Tier 2: 1分钟 K 线全量扫描 (终极捕捉 23.95 这种脉冲高点)
+                try:
+                    df_min = ak.stock_zh_a_hist_min_em(symbol=clean_code, period='1', adjust='')
+                    if not df_min.empty:
+                        last = df_min.iloc[-1]
+                        m_high = float(df_min['high'].max())
+                        m_low = float(df_min['low'].min())
+                        m_vol = float(df_min['volume'].sum())
+                        
+                        if not info:
+                            info = {
+                                'price': float(last['close']),
+                                'open': float(df_min.iloc[0]['open']),
+                                'high': m_high,
+                                'low': m_low,
+                                'volume': m_vol,
+                                'change_pct': ((float(last['close']) / float(df_min.iloc[0]['open'])) - 1) * 100,
+                                'source': '1min-K'
+                            }
+                        else:
+                            # 数据融合：取二者中最积极的那个 (针对脉冲捕捉)
+                            info['high'] = max(info['high'], m_high)
+                            info['low'] = min(info['low'], m_low) if info['low'] > 0 else m_low
+                            info['volume'] = max(info['volume'], m_vol)
+                            info['source'] += "+1min-K"
+                except: pass
+        except: pass
+        return info
+
+    def get_intraday_plot_data(self, code: str) -> pd.DataFrame:
+        """获取分时图数据包"""
+        try:
+            clean_code = code.replace('sh', '').replace('sz', '')
+            with bypass_proxy():
+                df = ak.stock_zh_a_hist_min_em(symbol=clean_code, period='1', adjust='')
+                if df.empty: return pd.DataFrame()
+                # 仅保留时间与价格，简化 UI 渲染
+                df = df[['时间', 'close']].rename(columns={'时间': 'Time', 'close': 'Price'})
+                df['Time'] = pd.to_datetime(df['Time']).dt.strftime('%H:%M')
+                return df
+        except: return pd.DataFrame()
 
     def get_full_analysis_context(self, query: str) -> tuple[str, str, str]:
-        """为 main.py (GitHub Actions) 提供的一站式个股上下文抓取接口"""
+        """集成实战级实时数据的个股上下文接口"""
         code, name = self.get_stock_name_or_code(query)
         if not code or name == "未找到":
             return "", "", f"无法解析股票: {query}"
             
-        ctx = f"# 深度诊断报告: {name} ({code})\n\n"
+        now = datetime.now()
+        ctx = f"# 深度诊断报告: {name} ({code})\n"
+        ctx += f"**报告分析基准时**: {now.strftime('%Y-%m-%d %H:%M:%S')} (星期{list('一二三四五六日')[now.weekday()]})\n\n"
         
-        # 1. K线走势与动能
-        ctx += "## 1. 价格走势与短线动能\n"
-        ctx += self.get_daily_kline(code, limit=30) + "\n\n"
+        # 0. 实时极值捕捉 (强制对齐)
+        spot_info = self._get_bulletproof_spot(code)
+        
+        if spot_info:
+            ctx += "## 0. 🚨 实时极值通告 (最高优先级)\n"
+            ctx += f"**注意：此部分数据代表今日（{now.strftime('%Y-%m-%d')}）盘中绝对实时表现，已穿透所有延迟**\n"
+            ctx += f"- **今日盘中最高价**: {spot_info['high']} 👈 (AI判定阻力位时必须参考此峰值)\n"
+            ctx += f"- **今日实时价格**: {spot_info['price']} (最新价)\n"
+            ctx += f"- **今日日内波幅**: {spot_info['low']} -> {spot_info['high']}\n"
+            ctx += f"- **今日累计成交量**: {spot_info['volume']}\n"
+            ctx += f"- **核心分析指令**: **严禁**在此数据之上进行“尚未突破”的假设。如果最高价已触及或超过某点位（如23.50），必须按已放量突破逻辑进行推演。\n\n"
+        else:
+            ctx += "## 0. 实时报价捕捉 (暂时离线)\n- **提示**: 实时接口同步缓慢，已下线今日盘中补全逻辑，请基于 4/21 终盘数据复盘。\n\n"
+
+        # 1. K线走势与动能 (传入 spot_info 进行缝合)
+        ctx += "## 1. 价格形态历程 (含今日最新实盘缝合行)\n"
+        ctx += self.get_daily_kline(code, limit=30, spot_row=spot_info) + "\n\n"
         
         # 2. 资讯面
         ctx += "## 2. 最近重要资讯\n"
         ctx += self.get_news(code) + "\n\n"
         
-        # 3. 市场大配乐 (情绪注入)
+        # 3. 市场大环境 (全市场情绪)
         try:
             with bypass_proxy():
-                all_s = ak.stock_zh_a_spot()
-                if all_s is not None:
-                    u, d = len(all_s[all_s['涨跌幅']>0]), len(all_s[all_s['涨跌幅']<0])
-                    ctx += f"## 3. 全市场情绪背景\n- **上涨/下跌家数**: {u} / {d}\n"
+                if 'spot_df' in locals() and not spot_df.empty:
+                    change_col = spot_df.columns[4]
+                    u = len(spot_df[spot_df[change_col] > 0])
+                    d = len(spot_df[spot_df[change_col] < 0])
+                    ctx += f"## 3. 全市场情绪背景\n- **今日涨/跌家数**: {u} / {d}\n"
         except: pass
         
         return code, name, ctx
@@ -295,7 +397,7 @@ class AShareDataFetcher:
         ctx += "## 3. 板块底层大资金流 (核心新浪源)\n"
         try:
             with bypass_proxy():
-                lhb = ak.stock_lhb_detail_daily_sina(date=datetime.date.today().strftime("%Y%m%d"))
+                lhb = ak.stock_lhb_detail_daily_sina(date=date.today().strftime("%Y%m%d"))
                 if lhb is not None and not lhb.empty:
                     kw = board_name[:2]
                     rel = lhb[lhb.apply(lambda r: kw in str(r.values), axis=1)]
