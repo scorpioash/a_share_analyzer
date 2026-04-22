@@ -1,6 +1,8 @@
 import streamlit as st
 import os
 import sys
+from datetime import datetime
+# Force reload trigger: normalize_datetime_imports_v3
 
 # 注入根目录路径，确保子页面能正确找到视觉组件
 sys.path.append(os.path.abspath("."))
@@ -36,9 +38,13 @@ if 'last_analysis' not in st.session_state:
 # If we have a stored analysis, display it immediately
 if st.session_state['last_analysis']:
     res = st.session_state['last_analysis']
-    st.success("恢复上次诊断报告：")
-    st.markdown(f"### 【{res['name']} - {res['code']}】")
+    # Removed the success message as requested
+    st.markdown(f"### 🎯 【{res['name']} - {res['code']}】诊断报告")
+    st.caption(f"🕒 本报告生成于: {res.get('timestamp', '未知时间')}")
     st.markdown(res['result'])
+    if st.button("🧹 清除报告并重新诊断", key="btn_clear_stock"):
+        st.session_state['last_analysis'] = None
+        st.rerun()
     st.divider()
 
 if st.button("开始诊断", key="btn_stock"):
@@ -59,24 +65,44 @@ if st.button("开始诊断", key="btn_stock"):
                 else:
                     st.write(f"已锁定股票: **{name} ({code})**")
                     
-                    st.write("2. 正在实时拉取 K 线与基本面数据...")
+                    st.write("2. 正在启动『三级防线』实时抓取引擎...")
+                    # 1. 抓取分时绘图数据
+                    plot_df = fetcher.get_intraday_plot_data(code)
+                    # 2. 抓取实盘核心指标 (用于 UI 展示)
+                    spot = fetcher._get_bulletproof_spot(code)
+                    
+                    if spot:
+                        # 在状态栏内展示实时仪表盘，增加可见性
+                        st.subheader(f"📈 {name} 实盘分时脉搏 (1分钟线)")
+                        col1, col2, col3, col4 = st.columns(4)
+                        col1.metric("当前价", f"{spot['price']:.2f}", f"{spot['change_pct']:.2f}%")
+                        col2.metric("今日最高", f"{spot['high']:.2f}")
+                        col3.metric("今日最低", f"{spot['low']:.2f}")
+                        col4.metric("成交量", f"{int(spot['volume'])}")
+                        
+                        if not plot_df.empty:
+                            st.line_chart(plot_df.set_index('Time')['Price'], color="#00ffcc")
+                            st.caption("注：分时图由 1 分钟 OHLC 聚合生成，确保捕捉日内极致脉冲。")
+                    
+                    st.write("3. 正在生成深度分析上下文...")
                     _, _, data_ctx = fetcher.get_full_analysis_context(code)
                     
                     # 追加用户临时输入的经验
                     if extra_stock_notes.strip():
                         data_ctx += f"\n\n## 11. 用户附加的个人判断与经验\n{extra_stock_notes.strip()}\n"
                     
-                    st.write(f"3. 数据获取成功，正在呼叫 {analyzer.provider.upper()} 根据经验进行深度推演...")
+                    st.write(f"4. 正在呼叫 {analyzer.provider.upper()} 进行多维度『实战级』推演...")
                     analysis_result = analyzer.analyze(data_ctx)
                     
                     # Save result to session state for persistence
                     st.session_state['last_analysis'] = {
                         'name': name,
                         'code': code,
-                        'result': analysis_result
+                        'result': analysis_result,
+                        'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     }
                     
                     status.update(label="诊断完成！", state="complete")
-                    st.rerun() # Trigger fresh rerun to update UI with cached state
+                    st.rerun() # Refresh to show result from persisted state
         except Exception as e:
             st.error(f"⚠️ 诊断中断或出错: {str(e)}")
