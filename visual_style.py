@@ -112,10 +112,10 @@ def inject_premium_style():
 
         /* 隐藏 Streamlit 原生报错中的干扰链接 */
         .stException pre {
-            display: none !important;
+            /* display: none !important; */
         }
         .stException .css-1dp5vir {
-            display: none !important;
+            /* display: none !important; */
         }
         
         /* 针对最新版 streamlit 的降噪 */
