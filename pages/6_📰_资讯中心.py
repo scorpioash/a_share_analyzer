@@ -29,20 +29,26 @@ with tab_global:
     st.info("展示东财 7×24 小时全球财经直播与重要快讯。")
     if st.button("拉取最新快讯"):
         with st.spinner("获取中..."):
-            df_global = fetcher.get_global_news()
-            if df_global is not None and not df_global.empty:
-                # 展现超链接
-                st.dataframe(
-                    df_global, 
-                    width='stretch', 
-                    hide_index=True,
-                    column_config={
-                        "url": st.column_config.LinkColumn("文章链接", help="点击跳转到原文", display_text="点击阅读"),
-                        "发布时间": st.column_config.TextColumn("发布时间", width="medium"),
-                    }
+            try:
+                df_global = fetcher.get_global_news()
+            except Exception as e:
+                df_global = None
+                st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
+
+        if df_global is not None and not df_global.empty:
+            # 智能列配置: 如有 url 列则做链接
+            col_config = {}
+            if 'url' in df_global.columns:
+                col_config['url'] = st.column_config.LinkColumn(
+                    "文章链接", help="点击跳转到原文", display_text="点击阅读"
                 )
-            else:
-                st.error("拉取财经快讯失败，请重试。")
+            if '发布时间' in df_global.columns:
+                col_config['发布时间'] = st.column_config.TextColumn("发布时间", width="medium")
+
+            st.dataframe(df_global, width='stretch', hide_index=True,
+                         column_config=col_config if col_config else None)
+        else:
+            st.warning("拉取财经快讯失败，请重试或检查网络。")
 
 with tab_individual:
     query = st.text_input("请输入股票名称或代码查询相关新闻", "贵州茅台")
@@ -52,5 +58,25 @@ with tab_individual:
             st.error("未能识别股票")
         else:
             with st.spinner(f"正在拉取 {name} ({code}) 的新闻..."):
+                try:
+                    # 使用 get_stock_news_detail 返回 DataFrame (资讯中心专用)
+                    df_news = fetcher.get_stock_news_detail(code)
+                except Exception as e:
+                    df_news = None
+                    st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
+
+            if df_news is not None and not df_news.empty:
+                st.success(f"📌 共获取 {len(df_news)} 条新闻。")
+                # 智能识别 URL 列
+                col_config = {}
+                for c in df_news.columns:
+                    if '链接' in str(c) or 'url' in str(c).lower() or 'link' in str(c).lower():
+                        col_config[c] = st.column_config.LinkColumn(
+                            str(c), display_text="查看原文"
+                        )
+                st.dataframe(df_news, width='stretch', hide_index=True,
+                             column_config=col_config if col_config else None)
+            else:
+                # 回退到 str 版 get_news
                 news_txt = fetcher.get_news(code)
                 st.markdown(news_txt)
