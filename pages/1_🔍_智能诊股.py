@@ -1,4 +1,5 @@
 import streamlit as st
+# Force Reload: v2.0 - Updated with manual PDF/MD export support
 import os
 import sys
 from datetime import datetime
@@ -11,22 +12,24 @@ from data_fetcher import AShareDataFetcher
 from llm_analyzer import LLMAnalyzer
 from visual_style import inject_premium_style, show_error_clean
 from market_monitor import render_market_monitor
+from report_exporter import ReportExporter
 
 # --- 注入视觉与监控 ---
 inject_premium_style()
 
-# 初始化组件（Analyzer 不进入 session_state 以便实时响应首页 API 修改）
+# 初始化组件
 if 'fetcher' not in st.session_state:
     st.session_state['fetcher'] = AShareDataFetcher()
 
 fetcher = st.session_state['fetcher']
-analyzer = LLMAnalyzer() # 实时读取最新配置
+analyzer = LLMAnalyzer() 
+exporter = ReportExporter()
 
 # 渲染侧边栏市场心跳仪表盘
 render_market_monitor(fetcher)
 
 st.title("🔍 智能诊股")
-st.markdown("通过名字或代码输入，结合本地 `my_strategy.md` 经验，让大模型为你深度诊股。")
+st.markdown("通过名字或代码输入，结合您的个性化铁律进行深度诊股。如需调整分析准则，请前往左侧 **[📋 策略配置]** 界面。")
 
 query = st.text_input("🔍 请输入 A 股代码或名称 (例如：贵州茅台，或 600519)", "", key="stock_query")
 extra_stock_notes = st.text_area("💡 附加经验/想法（可选）", placeholder="例如：我觉得这只票最近放量滞涨，主力可能在出货...", height=80, key="stock_notes")
@@ -35,14 +38,31 @@ extra_stock_notes = st.text_area("💡 附加经验/想法（可选）", placeho
 if 'last_analysis' not in st.session_state:
     st.session_state['last_analysis'] = None
 
-# If we have a stored analysis, display it immediately
+# 展示诊断结果
 if st.session_state['last_analysis']:
     res = st.session_state['last_analysis']
-    # Removed the success message as requested
     st.markdown(f"### 🎯 【{res['name']} - {res['code']}】诊断报告")
     st.caption(f"🕒 本报告生成于: {res.get('timestamp', '未知时间')}")
-    st.markdown(res['result'])
-    if st.button("🧹 清除报告并重新诊断", key="btn_clear_stock"):
+    
+    # 修正 Markdown 渲染（确保加粗成功）
+    cleaned_result = res['result'].replace('**"', ' **"').replace('"**', '"** ')
+    st.markdown(cleaned_result)
+    
+    # --- 导出功能区域 (手动) ---
+    st.markdown("#### 📥 导出与保存")
+    exp_col1, exp_col2, exp_col3 = st.columns([1, 1, 2])
+    
+    # 实时生成内容，不写盘
+    md_content = exporter.generate_markdown(res['name'], res['code'], res['result'])
+    pdf_bytes = exporter.generate_pdf(res['name'], res['code'], res['result'])
+    filename_base = f"Report_{res['name']}_{res['code']}"
+    
+    if md_content:
+        exp_col1.download_button("下载 Markdown", md_content, f"{filename_base}.md", "text/markdown", key="dl_md")
+    if pdf_bytes:
+        exp_col2.download_button("下载 PDF 报告", pdf_bytes, f"{filename_base}.pdf", "application/pdf", key="dl_pdf")
+
+    if st.button("扫清结果，重新诊断", key="btn_clear_stock"):
         st.session_state['last_analysis'] = None
         st.rerun()
     st.divider()
@@ -52,9 +72,7 @@ if st.button("开始诊断", key="btn_stock"):
         st.warning("请输入有效的股票代码或名称！")
     else:
         try:
-            # Clear previous result while running
             st.session_state['last_analysis'] = None
-            
             with st.status(f"正在诊断: {query}...", expanded=True) as status:
                 st.write("1. 正在检索股票代码...")
                 code, name = fetcher.get_stock_name_or_code(query)
@@ -64,25 +82,22 @@ if st.button("开始诊断", key="btn_stock"):
                     st.error(f"未找到与 '{query}' 相关的股票，请检查输入。")
                 else:
                     st.write(f"已锁定股票: **{name} ({code})**")
-                    
                     st.write("2. 正在启动『三级防线』实时抓取引擎...")
-                    # 1. 抓取分时绘图数据
                     plot_df = fetcher.get_intraday_plot_data(code)
-                    # 2. 抓取实盘核心指标 (用于 UI 展示)
                     spot = fetcher._get_bulletproof_spot(code)
                     
                     if spot:
-                        # 在状态栏内展示实时仪表盘，增加可见性
                         st.subheader(f"📈 {name} 实盘分时脉搏 (1分钟线)")
                         col1, col2, col3, col4 = st.columns(4)
-                        col1.metric("当前价", f"{spot['price']:.2f}", f"{spot['change_pct']:.2f}%")
+                        # delta_color="inverse" 实现红涨绿跌 (A股标准)
+                        col1.metric("当前价", f"{spot['price']:.2f}", f"{spot['change_pct']:.2f}%", delta_color="inverse")
                         col2.metric("今日最高", f"{spot['high']:.2f}")
                         col3.metric("今日最低", f"{spot['low']:.2f}")
                         col4.metric("成交量", f"{int(spot['volume'])}")
                         
                         if not plot_df.empty:
-                            st.line_chart(plot_df.set_index('Time')['Price'], color="#00ffcc")
-                            st.caption("注：分时图由 1 分钟 OHLC 聚合生成，确保捕捉日内极致脉冲。")
+                            st.line_chart(plot_df.set_index('Time')['Price'], color="#ff4b4b" if spot['change_pct'] > 0 else "#28a745")
+                            st.caption("注：分时图由 1 分钟 OHLC 聚合生成，颜色随涨跌实时切换（红涨绿跌）。")
                     
                     st.write("3. 正在生成深度分析上下文...")
                     _, _, data_ctx = fetcher.get_full_analysis_context(code)
