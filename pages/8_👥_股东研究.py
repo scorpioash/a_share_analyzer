@@ -31,23 +31,37 @@ if st.button("查询股东数据"):
         st.error("未能识别股票")
     else:
         st.write(f"### {name} ({code}) 股东结构解析")
-        
+
         cola, colb = st.columns(2)
-        
+
         with cola:
+            st.markdown("#### 🏦 十大流通股东")
             with st.spinner("拉取十大股东..."):
-                top_holders_df = fetcher.get_top_shareholders(code)
-            if top_holders_df is not None:
+                try:
+                    top_holders_df = fetcher.get_top_shareholders(code)
+                except Exception as e:
+                    top_holders_df = None
+                    st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
+
+            if top_holders_df is not None and not top_holders_df.empty:
                 st.dataframe(top_holders_df, width='stretch', hide_index=True)
             else:
                 st.warning("近期暂无该股的十大股东变动记录。")
-            
+
         with colb:
-            st.markdown("#### 股东户数变化")
+            st.markdown("#### 📉 股东户数变化")
             with st.spinner("拉取户数趋势..."):
-                holders_count_md = fetcher.get_shareholder_count(code)
-            
-            # 由于 get_shareholder_count 返回的是换行字符串，我们直接渲染
-            st.markdown(holders_count_md)
-        
-        st.info("提示：结合个股阶段走势。如果股价在底部但股东户数持续下降，通常是主力吸筹；如果是股价高位且股东户数大幅增加，需警惕主力派发筹码。")
+                try:
+                    # 使用 DataFrame 版本 (get_shareholder_count_detail)
+                    holders_count_df = fetcher.get_shareholder_count_detail(code)
+                except Exception as e:
+                    holders_count_df = None
+                    st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
+
+            if holders_count_df is not None and not holders_count_df.empty:
+                st.dataframe(holders_count_df, width='stretch', hide_index=True)
+            else:
+                st.warning("该股股东户数数据获取失败。")
+
+        st.info("💡 **筹码解读提示**：如果股价在底部但股东户数持续下降，通常是主力吸筹；"
+                "如果是股价高位且股东户数大幅增加，需警惕主力派发筹码。")
