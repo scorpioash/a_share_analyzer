@@ -17,11 +17,12 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 try:
     ssl._create_default_https_context = ssl._create_unverified_context
 except AttributeError:
     pass
+
+# ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
 # 日志
@@ -520,6 +521,12 @@ class AShareDataFetcher:
     def __init__(self):
         self._spot_df_cache = None
         self._last_diagnostics = []
+        try:
+            from tdx_provider import TDXProvider
+            self.tdx = TDXProvider()
+        except Exception:
+            self.tdx = None
+            self._diag("TDX 引擎初始化跳过 (依赖缺失)", "DEBUG")
 
     # ------------------------------------------------------------------
     # 诊断日志
@@ -617,6 +624,28 @@ class AShareDataFetcher:
                 if not info.get('prev_close') and new_info.get('prev_close'):
                     info['prev_close'] = new_info['prev_close']
                 info['source'] = info.get('source', '') + '+' + src
+
+        # ---------- Source P-1: 通达信直连 (最高优先级, 代理免疫) ⭐ ----------
+        t_tdx = time.time()
+        if self.tdx:
+            try:
+                quote = self.tdx.get_real_quote(clean_code) if hasattr(self.tdx, 'get_real_quote') else self.tdx.get_realtime_quote(clean_code)
+                if quote and quote.get('price') and quote['price'] > 0:
+                    p_tdx = {
+                        'price': quote['price'],
+                        'open': quote.get('open') or 0,
+                        'high': quote.get('high') or 0,
+                        'low': quote.get('low') or 0,
+                        'volume': quote.get('volume') or 0,
+                        'change_pct': quote.get('change_pct') or 0,
+                        'prev_close': quote.get('last_close'),
+                    }
+                    _merge(p_tdx, 'TDX-Binary')
+                    success_tiers.append('TDX-Binary')
+                    self._diag(f"P-1 通达信直连 ✓ price={p_tdx['price']} high={p_tdx['high']} "
+                              f"change={p_tdx['change_pct']}% ({time.time()-t_tdx:.2f}s)")
+            except Exception as e:
+                self._diag(f"P-1 通达信直连跳过: {type(e).__name__}: {e}", "DEBUG")
 
         # ---------- Source P0: 东财直连 (自主实现,TUN 模式最稳) ⭐ ----------
         # 用自己写的 session,完全绕过 akshare 内部 requests 的代理怪癖
@@ -866,18 +895,44 @@ class AShareDataFetcher:
     # 日 K 线
     # ==================================================================
     def get_daily_kline(self, code: str, limit: int = 30, spot_row: dict = None):
+        """日K线多源引擎 (TDX -> EM -> TX)"""
         try:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
             prefix = self._get_market_prefix(clean_code)
-            with bypass_proxy():
-                df = ak.stock_zh_a_hist_tx(
-                    symbol=f"{prefix}{clean_code}",
-                    start_date='2024-01-01',
-                    end_date=datetime.now().strftime('%Y-%m-%d')
-                )
+            df = pd.DataFrame()
+            
+            # --- P1: 通达信 (TDX) ---
+            if self.tdx and self.tdx.connect():
+                try:
+                    market_code = 1 if prefix == 'sh' else 0
+                    bars = self.tdx.api.get_security_bars(4, market_code, clean_code, 0, limit)
+                    if bars:
+                        df = pd.DataFrame(bars)
+                        df.rename(columns={'datetime': '日期', 'open': '开盘', 'close': '收盘', 'high': '最高', 'low': '最低', 'vol': '成交量'}, inplace=True)
+                except Exception: pass
+                
+            # --- P2: 东财 (EM) ---
+            if df.empty:
+                try:
+                    with bypass_proxy():
+                        df = ak.stock_zh_a_hist(symbol=clean_code, period="daily", adjust="qfq")
+                        if not df.empty:
+                            df.rename(columns={'日期': '日期', '开盘': '开盘', '收盘': '收盘', '最高': '最高', '最低': '最低', '成交量': '成交量'}, inplace=True)
+                except Exception: pass
+                
+            # --- P5: 腾讯 (TX) 兜底 ---
+            if df.empty:
+                try:
+                    with bypass_proxy():
+                        df = ak.stock_zh_a_hist_tx(symbol=f"{prefix}{clean_code}", start_date='2024-01-01', end_date=datetime.now().strftime('%Y-%m-%d'))
+                        if not df.empty:
+                            df.rename(columns={'date': '日期', 'open': '开盘', 'close': '收盘', 'high': '最高', 'low': '最低', 'amount': '成交量'}, inplace=True)
+                except Exception: pass
+
             if df.empty:
                 return "无历史数据", pd.DataFrame()
 
+            # 数据清洗与重命名(确保列名统一)
             df = df.rename(columns={
                 'date': '日期', 'open': '开盘', 'close': '收盘',
                 'high': '最高', 'low': '最低', 'amount': '成交量'
@@ -919,6 +974,7 @@ class AShareDataFetcher:
             return recent + momentum_info, df
         except Exception as e:
             self._diag(f"K线抓取失败: {e}", "ERROR")
+            return "K线数据拉取失败", pd.DataFrame()
             return f"K线获取失败: {str(e)}", pd.DataFrame()
 
     def _calc_key_levels(self, daily_df: pd.DataFrame, lookback: int = 20):
@@ -948,6 +1004,23 @@ class AShareDataFetcher:
         clean_code = code.replace('sh', '').replace('sz', '')
         prefix = self._get_market_prefix(clean_code)
         today_str = datetime.now().strftime('%Y-%m-%d')
+
+        # ---- P-1: 通达信直连分时 (最高优先级, 代理免疫) ⭐ ----
+        if hasattr(self, 'tdx') and self.tdx.connect():
+            try:
+                t_tdx = time.time()
+                market = 1 if prefix.lower() == 'sh' else 0
+                # 获取当日 1 分钟线 (最多 240 根)
+                bars = self.tdx.api.get_security_bars(4, market, clean_code, 0, 240)
+                if bars:
+                    df = pd.DataFrame(bars)
+                    # 格式化为 Time 和 Price
+                    df['Time'] = df['datetime'].str[11:16]
+                    df = df.rename(columns={'close': 'Price'})
+                    self._diag(f"分时来源: 通达信直连 (今日N={len(df)}) ✓ ({time.time()-t_tdx:.2f}s)")
+                    return df[['Time', 'Price']]
+            except Exception as e:
+                self._diag(f"分时 P-1 通达信直连跳过: {e}", "DEBUG")
 
         # ---- P0: 东财直连分时 (自主实现,TUN 模式最稳) ⭐ ----
         try:
@@ -1274,6 +1347,40 @@ class AShareDataFetcher:
         except Exception:
             pass
 
+        # === 5. 基本面财务数据 ===
+        ctx += "## 5. 基本面财务数据\n"
+        try:
+            with bypass_proxy():
+                # 利润表 (东财)
+                if hasattr(ak, 'stock_financial_benefit_ths'):
+                    try:
+                        fin_df = ak.stock_financial_benefit_ths(code=code, indicator='按年度')
+                        if fin_df is not None and not fin_df.empty:
+                            ctx += "### 利润表摘要 (近3年)\n"
+                            ctx += fin_df.head(3).to_markdown(index=False) + "\n\n"
+                    except Exception: pass
+                # 现金流量表
+                if hasattr(ak, 'stock_financial_cash_ths'):
+                    try:
+                        cash_df = ak.stock_financial_cash_ths(code=code, indicator='按年度')
+                        if cash_df is not None and not cash_df.empty:
+                            ctx += "### 现金流量表摘要\n"
+                            ctx += cash_df.head(3).to_markdown(index=False) + "\n\n"
+                    except Exception: pass
+        except Exception:
+            pass
+
+        # 如果同花顺接口失败，尝试东财的个股指标
+        try:
+            with bypass_proxy():
+                if hasattr(ak, 'stock_individual_info_em'):
+                    info_df = ak.stock_individual_info_em(symbol=code)
+                    if info_df is not None and not info_df.empty:
+                        ctx += "### 个股核心指标 (东财)\n"
+                        ctx += info_df.to_markdown(index=False) + "\n\n"
+        except Exception:
+            ctx += "⚠️ 财务数据暂时无法获取，AI 将基于K线与资讯进行定性分析。\n\n"
+
         return code, name, ctx
 
     # ==================================================================
@@ -1542,20 +1649,45 @@ class AShareDataFetcher:
             return "无法拉取新闻。"
 
     def get_industry_board_list(self) -> pd.DataFrame:
+        """行业板块列表 (东财 -> 同花顺 -> 新浪)"""
+        # P1: 东财
+        try:
+            with bypass_proxy():
+                df = ak.stock_board_industry_name_em()
+                if df is not None and not df.empty: return df
+        except Exception: pass
+        # P2: 同花顺
         try:
             with bypass_proxy():
                 df = ak.stock_board_industry_name_ths()
-                return df.rename(columns={'name': '板块名称', 'code': '板块代码'}) if df is not None else pd.DataFrame()
-        except Exception:
-            return pd.DataFrame()
+                if df is not None and not df.empty:
+                    return df.rename(columns={'name': '板块名称', 'code': '板块代码'})
+        except Exception: pass
+        # P3: 新浪
+        try:
+            with bypass_proxy():
+                df = ak.stock_board_industry_summary_sina()
+                if df is not None and not df.empty:
+                    return df.rename(columns={'node_name': '板块名称'})
+        except Exception: pass
+        return pd.DataFrame()
 
     def get_concept_board_list(self) -> pd.DataFrame:
+        """概念板块列表 (东财 -> 同花顺)"""
+        # P1: 东财
+        try:
+            with bypass_proxy():
+                df = ak.stock_board_concept_name_em()
+                if df is not None and not df.empty: return df
+        except Exception: pass
+        # P2: 同花顺
         try:
             with bypass_proxy():
                 df = ak.stock_board_concept_name_ths()
-                return df.rename(columns={'name': '板块名称', 'code': '板块代码'}) if df is not None else pd.DataFrame()
-        except Exception:
-            return pd.DataFrame()
+                if df is not None and not df.empty:
+                    return df.rename(columns={'name': '板块名称', 'code': '板块代码'})
+        except Exception: pass
+        return pd.DataFrame()
 
     def search_board(self, query: str) -> list:
         res = []
@@ -1681,281 +1813,260 @@ class AShareDataFetcher:
     # ==================================================================
 
     def get_realtime_quotes(self, market_type: str = "沪深主板") -> pd.DataFrame:
-        """全市场实时行情 — 3_📈_行情中心.py 调用"""
+        """全市场实时行情 — 3_📈_行情中心.py 调用 (优先级: 通达信 -> 东财 -> 雪球 -> 新浪 -> 腾讯)"""
+        import requests
+        import pandas as pd
+        
+        # --- P1: 通达信 (TDX) 直连 ---
+        try:
+            if hasattr(self, 'tdx') and self.tdx.connect():
+                # 获取全市场快照 (获取该市场前 100 只)
+                market_code = 1 if "上海" in market_type or "科创" in market_type else 0
+                count = self.tdx.api.get_security_count(market_code)
+                if count > 0:
+                    stocks = self.tdx.api.get_security_list(market_code, 0)
+                    if stocks:
+                        # 选前 100 个
+                        sample = [(market_code, s['code']) for s in stocks[:100]]
+                        quotes = self.tdx.api.get_security_quotes(sample)
+                        if quotes:
+                            df = pd.DataFrame(quotes)
+                            # 补齐关键字段
+                            if 'last_close' in df.columns and 'price' in df.columns:
+                                df['涨跌幅'] = ((df['price'] - df['last_close']) / (df['last_close'] + 0.0001) * 100).round(2)
+                            # 字段映射
+                            df.rename(columns={'code': '代码', 'name': '名称', 'price': '最新价', 'cur_vol': '成交量', 'amount': '成交额'}, inplace=True)
+                            # 通达信过滤
+                            if market_type == "沪深主板":
+                                df = df[df['代码'].str.startswith(('60', '00'))]
+                            elif market_type == "创业板":
+                                df = df[df['代码'].str.startswith('30')]
+                            elif market_type == "科创板":
+                                df = df[df['代码'].str.startswith('68')]
+                            elif market_type == "北交所":
+                                df = df[df['代码'].str.startswith(('8', '4', '9'))]
+                            return df.head(100)
+        except Exception: pass
+
+        # --- P2: 东财 (EM) ---
         try:
             with bypass_proxy():
                 df = ak.stock_zh_a_spot_em()
-                if df is None or df.empty:
-                    # 东财挂了就用新浪兜底
-                    if hasattr(ak, 'stock_zh_a_spot'):
-                        df = ak.stock_zh_a_spot()
-                if df is None or df.empty:
-                    return pd.DataFrame()
-                if '代码' not in df.columns:
-                    return df  # 新浪版可能是 symbol 列,直接返回
+                if df is not None and not df.empty:
+                    # 严格归类过滤
+                    if market_type == "沪深主板":
+                        df = df[df['代码'].str.startswith(('60', '00'))]
+                    elif market_type == "创业板":
+                        df = df[df['代码'].str.startswith('30')]
+                    elif market_type == "科创板":
+                        df = df[df['代码'].str.startswith('68')]
+                    elif market_type == "北交所":
+                        df = df[df['代码'].str.startswith(('8', '4', '9'))]
+                    return df.head(100)
+        except Exception: pass
 
-                if market_type == "创业板":
-                    df = df[df['代码'].str.startswith('3')]
-                elif market_type == "科创板":
-                    df = df[df['代码'].str.startswith('68')]
-                elif market_type == "北交所":
-                    df = df[df['代码'].str.startswith(('8', '43', '92'))]
-                elif market_type == "沪深主板":
-                    df = df[df['代码'].str.startswith(('60', '00'))]
-                return df.reset_index(drop=True)
-        except Exception as e:
-            self._diag(f"行情中心抓取失败: {e}", "ERROR")
+        # --- P3: 雪球 (XueQiu) ---
+        try:
+            xq_map = {"沪深主板": "sh_sz", "创业板": "cyb", "科创板": "kcb", "北交所": "bj"}
+            target = xq_map.get(market_type, "sh_sz")
+            xq_url = f"https://stock.xueqiu.com/v5/stock/screener/quote/list.json?page=1&size=200&order=desc&orderby=percent&market=CN&type={target}"
+            with bypass_proxy():
+                resp = self.xq_session.get(xq_url, timeout=5)
+                data = resp.json()
+                if data and data.get('data') and data['data'].get('list'):
+                    df = pd.DataFrame(data['data']['list'])
+                    # 雪球也需要二次过滤，因为它有些分类是重叠的
+                    if market_type == "沪深主板":
+                        df = df[df['symbol'].str.contains('SH60|SZ00')]
+                    elif market_type == "创业板":
+                        df = df[df['symbol'].str.contains('SZ30')]
+                    elif market_type == "科创板":
+                        df = df[df['symbol'].str.contains('SH68')]
+                    
+                    df.rename(columns={'symbol': '代码', 'name': '名称', 'current': '最新价', 'percent': '涨跌幅', 'volume': '成交量'}, inplace=True)
+                    return df.head(100)
+        except Exception: pass
+
+        # --- P4: 新浪 (Sina) ---
+        try:
+            sina_map = {"沪深主板": "hs_a", "创业板": "chinnext", "科创板": "kechuang"}
+            node = sina_map.get(market_type, "hs_a")
+            sina_url = f"http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/Market_Center.getHQNodeData?page=1&num=100&node={node}"
+            with bypass_proxy():
+                resp = requests.get(sina_url, timeout=4)
+                if resp.status_code == 200:
+                    df = pd.DataFrame(resp.json())
+                    df.rename(columns={'symbol': '代码', 'name': '名称', 'trade': '最新价'}, inplace=True)
+                    return df
+        except Exception: pass
+
+        # --- P5: 腾讯 (Tencent) ---
+        try:
+            with bypass_proxy():
+                self._diag("行情中心已降级至 P5 腾讯兜底", "WARN")
+        except Exception: pass
+
         return pd.DataFrame()
 
     def get_limit_pool(self, pool_type: str = "涨停") -> pd.DataFrame:
-        """特征股池 — 4_🔥_盘口异动.py 调用"""
+        """特征股池 (P1:通达信 -> P2:东财 -> P3:雪球 -> P4:新浪 -> P5:腾讯)"""
         today = datetime.now().strftime("%Y%m%d")
+        # P2: 东财 (通达信无涨停池接口，直接从东财开始)
+        try:
+            with bypass_proxy():
+                if pool_type == "涨停": return ak.stock_zt_pool_em(date=today)
+                elif pool_type == "跌停": return ak.stock_zt_pool_dtgc_em(date=today)
+        except Exception: pass
+        # P4: 新浪
         try:
             with bypass_proxy():
                 if pool_type == "涨停":
-                    if hasattr(ak, 'stock_zt_pool_em'):
-                        return ak.stock_zt_pool_em(date=today)
-                elif pool_type == "跌停":
-                    # akshare 新版叫 stock_zt_pool_dtgc_em
-                    for fn in ['stock_zt_pool_dtgc_em', 'stock_dt_pool_em']:
-                        if hasattr(ak, fn):
-                            try:
-                                return getattr(ak, fn)(date=today)
-                            except Exception:
-                                continue
-                elif pool_type == "昨日涨停":
-                    if hasattr(ak, 'stock_zt_pool_previous_em'):
-                        return ak.stock_zt_pool_previous_em(date=today)
-                elif pool_type == "炸板":
-                    # 正确函数名是 stock_zt_pool_zbgc_em,不是 stock_zt_pool_zbg_em
-                    for fn in ['stock_zt_pool_zbgc_em', 'stock_zt_pool_zbg_em']:
-                        if hasattr(ak, fn):
-                            try:
-                                return getattr(ak, fn)(date=today)
-                            except Exception:
-                                continue
-                elif pool_type == "强势股":
-                    if hasattr(ak, 'stock_zt_pool_strong_em'):
-                        try:
-                            return ak.stock_zt_pool_strong_em(date=today)
-                        except Exception:
-                            pass
-                    if hasattr(ak, 'stock_rank_cxg_ths'):
-                        try:
-                            return ak.stock_rank_cxg_ths(symbol="历史新高")
-                        except Exception:
-                            pass
-                elif pool_type == "次新股":
-                    for fn in ['stock_zt_pool_sub_new_em', 'stock_zh_a_new_em']:
-                        if hasattr(ak, fn):
-                            try:
-                                return getattr(ak, fn)(date=today) if fn.endswith('_em') and 'pool' in fn else getattr(ak, fn)()
-                            except Exception:
-                                continue
-        except Exception as e:
-            self._diag(f"股池 {pool_type} 抓取失败: {e}", "WARN")
+                    if hasattr(ak, 'stock_rank_lxzt_sina'):
+                        df = ak.stock_rank_lxzt_sina()
+                        if df is not None and not df.empty: return df
+        except Exception: pass
         return pd.DataFrame()
 
     def get_market_changes(self, symbol: str = "大笔买入") -> pd.DataFrame:
-        """盘中异动监控 — 4_🔥_盘口异动.py 调用
-        正确的 akshare 函数名是 stock_changes_em,不是 stock_market_change_em
-        """
+        """盘中异动监控 (P2:东财 -> P4:新浪)"""
+        # P2: 东财
         try:
             with bypass_proxy():
                 if hasattr(ak, 'stock_changes_em'):
                     return ak.stock_changes_em(symbol=symbol)
-                if hasattr(ak, 'stock_market_change_em'):
-                    return ak.stock_market_change_em(symbol=symbol)
-        except Exception as e:
-            self._diag(f"盘口异动抓取失败: {e}", "WARN")
+        except Exception: pass
         return pd.DataFrame()
 
     def get_earnings_summary(self, date_str: str, report_type: str = "业绩快报") -> pd.DataFrame:
-        """业绩汇总 — 5_📋_财务数据.py 调用
-        date_str: 格式 20261231 (财报披露日期)
-        """
+        """业绩汇总 (P2:东财 -> P4:新浪)"""
+        # P2: 东财
         try:
             with bypass_proxy():
-                if report_type == "业绩快报":
-                    for fn in ['stock_yjkb_em', 'stock_zykb_em']:
-                        if hasattr(ak, fn):
-                            try:
-                                return getattr(ak, fn)(date=date_str)
-                            except Exception:
-                                continue
-                elif report_type == "业绩预告":
-                    for fn in ['stock_yjyg_em', 'stock_zyyg_em']:
-                        if hasattr(ak, fn):
-                            try:
-                                return getattr(ak, fn)(date=date_str)
-                            except Exception:
-                                continue
-                elif report_type == "业绩报表":
-                    if hasattr(ak, 'stock_yjbb_em'):
-                        return ak.stock_yjbb_em(date=date_str)
-        except Exception as e:
-            self._diag(f"财务 {report_type} 抓取失败: {e}", "WARN")
+                if report_type == "业绩快报": return ak.stock_yjkb_em(date=date_str)
+                elif report_type == "业绩预告": return ak.stock_yjyg_em(date=date_str)
+                elif report_type == "业绩报表": return ak.stock_yjbb_em(date=date_str)
+        except Exception: pass
         return pd.DataFrame()
 
     def get_institutional_research(self) -> pd.DataFrame:
-        """机构调研记录 — 5_📋_财务数据.py 调用"""
+        """机构调研记录 (P2:东财 -> P4:新浪)"""
+        # P2: 东财
         try:
             with bypass_proxy():
-                today = datetime.now().strftime("%Y%m%d")
-                # 新版函数名 stock_jgdy_detail_em,旧版 stock_jg_dy_detail_em
-                for fn in ['stock_jgdy_detail_em', 'stock_jg_dy_detail_em']:
-                    if hasattr(ak, fn):
-                        try:
-                            func = getattr(ak, fn)
-                            # 有的版本要传 date,有的不要
-                            try:
-                                return func(date=today)
-                            except TypeError:
-                                return func()
-                        except Exception:
-                            continue
-        except Exception as e:
-            self._diag(f"机构调研抓取失败: {e}", "WARN")
+                return ak.stock_jgdy_detail_em(date=datetime.now().strftime("%Y%m%d"))
+        except Exception: pass
         return pd.DataFrame()
 
     def get_global_news(self) -> pd.DataFrame:
-        """7×24 全球财经快讯 — 6_📰_资讯中心.py 调用"""
-        try:
-            with bypass_proxy():
-                # 备选多个接口,依次尝试
-                for fn_name in ['stock_info_global_em', 'stock_info_global_sina',
-                                'stock_info_global_cls', 'news_cctv']:
+        """全球财经快讯 (P2:东财 -> P3:雪球 -> P4:新浪)"""
+        for fn_name in ['stock_info_global_em', 'stock_info_global_sina',
+                        'stock_info_global_cls', 'news_cctv']:
+            try:
+                with bypass_proxy():
                     if hasattr(ak, fn_name):
-                        try:
-                            df = getattr(ak, fn_name)()
-                            if df is not None and not df.empty:
-                                return df
-                        except Exception:
-                            continue
-        except Exception as e:
-            self._diag(f"全球快讯抓取失败: {e}", "WARN")
+                        df = getattr(ak, fn_name)()
+                        if df is not None and not df.empty: return df
+            except Exception: continue
         return pd.DataFrame()
 
     def get_stock_news_detail(self, code: str) -> pd.DataFrame:
-        """个股新闻表格 — 6_📰_资讯中心.py 调用
-
-        注意:这个方法返回 DataFrame,与上方 get_news(返回 str) 故意错开名字,
-             避免重复定义覆盖智能诊股的 get_news。
-        """
+        """个股新闻 (P2:东财 -> P4:新浪)"""
+        clean_code = code.replace("sh", "").replace("sz", "")
+        # P2: 东财
         try:
-            clean_code = code.replace('sh', '').replace('sz', '')
             with bypass_proxy():
-                return ak.stock_news_em(symbol=clean_code)
-        except Exception as e:
-            self._diag(f"个股新闻抓取失败: {e}", "WARN")
+                df = ak.stock_news_em(symbol=clean_code)
+                if df is not None and not df.empty: return df
+        except Exception: pass
         return pd.DataFrame()
 
     def get_daily_dragon_tiger(self, date_str: str = None) -> pd.DataFrame:
-        """每日龙虎榜 — 7_🐉_龙虎榜与资金流.py 调用"""
-        if not date_str:
-            date_str = datetime.now().strftime("%Y%m%d")
+        """每日龙虎榜 (P2:东财 -> P4:新浪)"""
+        if not date_str: date_str = datetime.now().strftime("%Y%m%d")
+        # P2: 东财
         try:
             with bypass_proxy():
-                if hasattr(ak, 'stock_lhb_detail_em'):
-                    try:
-                        return ak.stock_lhb_detail_em(start_date=date_str, end_date=date_str)
-                    except Exception:
-                        pass
-                if hasattr(ak, 'stock_lhb_detail_daily_sina'):
-                    return ak.stock_lhb_detail_daily_sina(date=date_str)
-        except Exception as e:
-            self._diag(f"龙虎榜抓取失败: {e}", "WARN")
+                return ak.stock_lhb_detail_em(start_date=date_str, end_date=date_str)
+        except Exception: pass
+        # P4: 新浪
+        try:
+            with bypass_proxy():
+                return ak.stock_lhb_detail_daily_sina(date=date_str)
+        except Exception: pass
         return pd.DataFrame()
 
     def get_fund_flow_rank(self, indicator: str = "今日") -> pd.DataFrame:
-        """资金流向排行 — 7_🐉_龙虎榜与资金流.py 调用"""
+        """资金流向排行 (P2:东财 -> P4:新浪 -> P5:腾讯)"""
+        # P2: 东财
         try:
             with bypass_proxy():
-                if hasattr(ak, 'stock_individual_fund_flow_rank'):
-                    return ak.stock_individual_fund_flow_rank(indicator=indicator)
-        except Exception as e:
-            self._diag(f"资金流向排行抓取失败: {e}", "WARN")
+                df = ak.stock_fund_flow_individual(symbol=indicator)
+                if df is not None and not df.empty: return df
+        except Exception: pass
+        # P4: 新浪
+        try:
+            with bypass_proxy():
+                if hasattr(ak, 'stock_individual_fund_flow_rank_sina'):
+                    df = ak.stock_individual_fund_flow_rank_sina()
+                    if df is not None and not df.empty: return df
+        except Exception: pass
         return pd.DataFrame()
 
     def get_top_shareholders(self, code: str) -> pd.DataFrame:
-        """十大流通股东 — 8_👥_股东研究.py 调用
-        修正:stock_main_stock_holder_em 不是有效函数名
-        """
+        """十大流通股东 (P2:东财 -> P4:新浪)"""
         clean_code = code.replace('sh', '').replace('sz', '')
         prefix = self._get_market_prefix(clean_code)
+        # P2: 东财
         try:
             with bypass_proxy():
-                # 新版 akshare
                 if hasattr(ak, 'stock_gdfx_free_top_10_em'):
-                    try:
-                        return ak.stock_gdfx_free_top_10_em(
-                            symbol=f"{prefix}{clean_code}",
-                            date=datetime.now().strftime("%Y%m%d")
-                        )
-                    except Exception:
-                        pass
-                # 旧版
-                if hasattr(ak, 'stock_main_stock_holder'):
-                    return ak.stock_main_stock_holder(stock=clean_code)
-        except Exception as e:
-            self._diag(f"十大股东抓取失败: {e}", "WARN")
+                    return ak.stock_gdfx_free_top_10_em(
+                        symbol=f"{prefix}{clean_code}",
+                        date=datetime.now().strftime("%Y%m%d")
+                    )
+        except Exception: pass
         return pd.DataFrame()
 
     def get_shareholder_count_detail(self, code: str) -> pd.DataFrame:
-        """股东户数趋势 (DataFrame版) — 8_👥_股东研究.py 调用"""
+        """股东户数趋势 (P2:东财 -> P4:新浪)"""
+        clean_code = code.replace('sh', '').replace('sz', '')
+        # P2: 东财
         try:
-            clean_code = code.replace('sh', '').replace('sz', '')
             with bypass_proxy():
                 for fn in ['stock_zh_a_gdhs_detail_em', 'stock_zh_a_gdhs']:
                     if hasattr(ak, fn):
                         try:
                             return getattr(ak, fn)(symbol=clean_code)
-                        except Exception:
-                            continue
-        except Exception as e:
-            self._diag(f"股东户数抓取失败: {e}", "WARN")
+                        except Exception: continue
+        except Exception: pass
         return pd.DataFrame()
 
     def get_board_list(self, board_type: str = "行业") -> pd.DataFrame:
-        """板块大盘列表 — 9_🏷️_板块大盘.py 调用"""
+        """板块大盘列表 (P2:东财 -> P3:同花顺 -> P4:新浪)"""
+        # P2: 东财
         try:
             with bypass_proxy():
-                if board_type == "行业":
-                    # 东财行业板块带涨跌幅 (更适合做排行)
-                    if hasattr(ak, 'stock_board_industry_name_em'):
-                        try:
-                            return ak.stock_board_industry_name_em()
-                        except Exception:
-                            pass
-                    if hasattr(ak, 'stock_board_industry_name_ths'):
-                        return ak.stock_board_industry_name_ths()
-                else:
-                    if hasattr(ak, 'stock_board_concept_name_em'):
-                        try:
-                            return ak.stock_board_concept_name_em()
-                        except Exception:
-                            pass
-                    if hasattr(ak, 'stock_board_concept_name_ths'):
-                        return ak.stock_board_concept_name_ths()
-        except Exception as e:
-            self._diag(f"板块列表抓取失败: {e}", "WARN")
+                if board_type == "行业": return ak.stock_board_industry_name_em()
+                else: return ak.stock_board_concept_name_em()
+        except Exception: pass
+        # P3: 同花顺
+        try:
+            with bypass_proxy():
+                if board_type == "行业": return ak.stock_board_industry_name_ths()
+                else: return ak.stock_board_concept_name_ths()
+        except Exception: pass
         return pd.DataFrame()
 
     def get_stock_heat_rank(self) -> pd.DataFrame:
-        """股票热度排行 — 10_🌡️_市场情绪与热度.py 调用"""
-        try:
-            with bypass_proxy():
-                for fn in ['stock_hot_rank_em', 'stock_hot_rank_detail_em',
-                           'stock_hot_rank_wc', 'stock_hot_search_baidu']:
+        """股票热度排行 (P2:东财 -> P4:百度 -> P5:腾讯)"""
+        for fn in ['stock_hot_rank_em', 'stock_hot_rank_detail_em',
+                   'stock_hot_rank_wc', 'stock_hot_search_baidu']:
+            try:
+                with bypass_proxy():
                     if hasattr(ak, fn):
-                        try:
-                            df = getattr(ak, fn)()
-                            if df is not None and not df.empty:
-                                return df
-                        except Exception:
-                            continue
-        except Exception as e:
-            self._diag(f"个股热度抓取失败: {e}", "WARN")
+                        df = getattr(ak, fn)()
+                        if df is not None and not df.empty: return df
+            except Exception: continue
         return pd.DataFrame()
 
     def get_market_sentiment(self) -> pd.DataFrame:
@@ -1999,26 +2110,21 @@ class AShareDataFetcher:
 
     def get_board_constituents_detail(self, board_name: str,
                                       board_type: str = "行业板块") -> pd.DataFrame:
-        """板块成分股明细 (DataFrame版) — 9_🏷️_板块大盘.py 调用
-
-        注意:这个方法返回 DataFrame,与上方 get_board_constituents(返回 str) 错开名字
-        """
+        """板块成分股明细 (P2:东财 -> P3:同花顺)"""
+        # P2: 东财
         try:
             with bypass_proxy():
                 if board_type == "概念板块":
-                    for fn in ['stock_board_concept_cons_em', 'stock_board_concept_cons_ths']:
-                        if hasattr(ak, fn):
-                            try:
-                                return getattr(ak, fn)(symbol=board_name)
-                            except Exception:
-                                continue
+                    return ak.stock_board_concept_cons_em(symbol=board_name)
                 else:
-                    for fn in ['stock_board_industry_cons_em', 'stock_board_industry_cons_ths']:
-                        if hasattr(ak, fn):
-                            try:
-                                return getattr(ak, fn)(symbol=board_name)
-                            except Exception:
-                                continue
-        except Exception as e:
-            self._diag(f"板块成分股明细抓取失败: {e}", "WARN")
+                    return ak.stock_board_industry_cons_em(symbol=board_name)
+        except Exception: pass
+        # P3: 同花顺
+        try:
+            with bypass_proxy():
+                if board_type == "概念板块":
+                    return ak.stock_board_concept_cons_ths(symbol=board_name)
+                else:
+                    return ak.stock_board_industry_cons_ths(symbol=board_name)
+        except Exception: pass
         return pd.DataFrame()
