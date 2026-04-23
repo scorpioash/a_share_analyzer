@@ -4,19 +4,32 @@ FROM python:3.10-slim
 # 设置工作目录
 WORKDIR /app
 
-# 设置时区为上海，确保系统时间正确
-ENV TZ=Asia/Shanghai
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+# 安装必要的系统依赖（PDF 生成和网络工具）
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    software-properties-common \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-# 复制依赖配置并安装
+# 复制依赖文件
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-# 把整个项目拷贝进容器
+# 安装 Python 依赖
+RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir fpdf2 pytdx
+
+# 复制项目所有文件
 COPY . .
 
-# 暴露 Streamlit 的默认端口
+# 暴露 Streamlit 默认端口
 EXPOSE 8501
 
-# 启动网页端分析界面
-ENTRYPOINT ["streamlit", "run", "web_ui.py", "--server.port=8501", "--server.address=0.0.0.0"]
+# 设置环境变量，确保 Streamlit 正常运行
+ENV STREAMLIT_SERVER_PORT=8501
+ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
+
+# 启动命令
+HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
+
+ENTRYPOINT ["streamlit", "run", "首页.py", "--server.port=8501", "--server.address=0.0.0.0"]
