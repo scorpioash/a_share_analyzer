@@ -30,25 +30,35 @@ with tab_lhb:
     st.info("查询个股因异动被交易所公布的买卖席位数据。")
     default_date = datetime.datetime.now().strftime("%Y%m%d")
     lhb_date = st.text_input("请输入交易日 (格式 YYYYMMDD)", value=default_date)
-    
+
     if st.button("查询龙虎榜"):
         with st.spinner("拉取数据中..."):
-            df_lhb = fetcher.get_daily_dragon_tiger(lhb_date)
-            if df_lhb is not None and not df_lhb.empty:
-                st.success(f"📌 {lhb_date} 共上榜 {len(df_lhb)} 次。")
-                st.dataframe(df_lhb, width='stretch', hide_index=True)
-            else:
-                st.warning("暂无数据，可能是周末/节假日，或者当日龙虎榜尚未公布。")
+            try:
+                df_lhb = fetcher.get_daily_dragon_tiger(lhb_date)
+            except Exception as e:
+                df_lhb = None
+                st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
+
+        if df_lhb is not None and not df_lhb.empty:
+            st.success(f"📌 {lhb_date} 共上榜 {len(df_lhb)} 次。")
+            st.dataframe(df_lhb, width='stretch', hide_index=True)
+        else:
+            st.warning("暂无数据，可能是周末/节假日，或者当日龙虎榜尚未公布（一般晚上 17:00 后更新）。")
 
 with tab_flow:
     st.info("展示全市场个股资金流向排行，洞察主力资金进攻方向。")
     indicator = st.selectbox("选择统计周期", ["今日", "3日", "5日", "10日"])
-    
+
     if st.button("查询资金流向"):
         with st.spinner("拉取资金流向中..."):
-            df_flow = fetcher.get_fund_flow_rank(indicator)
-            if df_flow is not None and not df_flow.empty:
-                st.success(f"📌 共获取 {len(df_flow)} 只个股资金数据。")
-                st.dataframe(df_flow, width='stretch', hide_index=True)
-            else:
-                st.error("获取资金流向排名失败。")
+            try:
+                df_flow = fetcher.get_fund_flow_rank(indicator)
+            except Exception as e:
+                df_flow = None
+                st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
+
+        if df_flow is not None and not df_flow.empty:
+            st.success(f"📌 共获取 {len(df_flow)} 只个股资金数据。")
+            st.dataframe(df_flow, width='stretch', hide_index=True)
+        else:
+            st.warning("获取资金流向排名失败。可能非交易时段或接口限流。")
