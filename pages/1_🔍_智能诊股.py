@@ -32,7 +32,6 @@ st.title("🔍 智能诊股")
 st.markdown("通过名字或代码输入，结合您的个性化铁律进行深度诊股。如需调整分析准则，请前往左侧 **[📋 策略配置]** 界面。")
 
 query = st.text_input("🔍 请输入 A 股代码或名称 (例如：贵州茅台，或 600519)", "", key="stock_query")
-extra_stock_notes = st.text_area("💡 附加经验/想法（可选）", placeholder="例如：我觉得这只票最近放量滞涨，主力可能在出货...", height=80, key="stock_notes")
 
 # --- State Preservation Logic ---
 if 'last_analysis' not in st.session_state:
@@ -187,10 +186,6 @@ if st.button("开始诊断", key="btn_stock"):
                     
                     st.write("3. 正在生成深度分析上下文...")
                     _, _, data_ctx = fetcher.get_full_analysis_context(code)
-                    
-                    # 追加用户临时输入的经验
-                    if extra_stock_notes.strip():
-                        data_ctx += f"\n\n## 11. 用户附加的个人判断与经验\n{extra_stock_notes.strip()}\n"
                     
                     st.write(f"4. 正在呼叫 {analyzer.provider.upper()} 进行多维度『实战级』推演...")
                     analysis_result = analyzer.analyze(data_ctx)
