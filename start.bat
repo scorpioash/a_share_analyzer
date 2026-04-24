@@ -35,5 +35,5 @@ if not exist ".env" (
 
 :: 6. 启动 Web 界面
 echo [+] 正在启动 Web 服务器，请保持此窗口开启...
-streamlit run 首页.py
+streamlit run app.py
 pause
