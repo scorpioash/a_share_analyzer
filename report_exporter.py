@@ -62,26 +62,34 @@ class ReportExporter:
             # 正文渲染
             pdf.set_font(active_font, size=11)
 
-            # 清洗内容：移除可能导致 PDF 崩溃的特殊字符
-            safe_result = result.encode('utf-8', 'ignore').decode('utf-8')
-            # 移除 Markdown 格式符号
-            for ch in ['**', '__', '> ', '> [!', '```', '---']:
-                safe_result = safe_result.replace(ch, '')
+            # 清洗内容：移除可能导致 PDF 崩溃的特殊字符和 Emoji
+            def clean_text(text):
+                import re
+                # 1. 移除 Markdown 符号
+                for ch in ['**', '__', '> ', '> [!', '```', '---']:
+                    text = text.replace(ch, '')
+                # 2. 移除补充平面的 Emoji
+                text = "".join(c for c in text if ord(c) < 0xFFFF)
+                # 3. 移除特殊提示符如 [!TIP]
+                text = re.sub(r'\[!(TIP|IMPORTANT|WARNING|CAUTION|NOTE)\]', '', text)
+                # 4. 移除 BMP 内的杂项符号和变体选择器 (⚠, ⚡, ️ 等)
+                text = re.sub(r'[\u2600-\u27BF\uFE00-\uFE0F]', '', text)
+                return text.encode('utf-8', 'ignore').decode('utf-8')
 
-            lines = safe_result.split('\n')
+            lines = result.split('\n')
             for line in lines:
-                if not line.strip():
+                clean_line = clean_text(line)
+                if not clean_line.strip():
                     pdf.ln(3)
                     continue
                 if line.startswith('##') or line.startswith('#'):
                     pdf.set_font(active_font, size=13)
-                    pdf.multi_cell(0, 8, line.lstrip('#').strip())
+                    pdf.multi_cell(0, 8, clean_line.strip())
                     pdf.set_font(active_font, size=11)
                 else:
                     try:
-                        pdf.multi_cell(0, 7, line)
+                        pdf.multi_cell(0, 7, clean_line)
                     except Exception:
-                        # 跳过无法渲染的行
                         continue
 
             return bytes(pdf.output())
