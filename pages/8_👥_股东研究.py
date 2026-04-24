@@ -5,7 +5,7 @@ import sys
 # 注入根目录路径
 sys.path.append(os.path.abspath("."))
 
-from visual_style import inject_premium_style, show_error_clean
+from visual_style import inject_premium_style, render_styled_dataframe, show_error_clean
 from market_monitor import render_market_monitor
 
 # --- 注入视觉与监控 ---
@@ -44,7 +44,7 @@ if st.button("查询股东数据"):
                     st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
 
             if top_holders_df is not None and not top_holders_df.empty:
-                st.dataframe(top_holders_df, width='stretch', hide_index=True)
+                render_styled_dataframe(top_holders_df, width='stretch', hide_index=True)
             else:
                 st.warning("近期暂无该股的十大股东变动记录。")
 
@@ -59,7 +59,7 @@ if st.button("查询股东数据"):
                     st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
 
             if holders_count_df is not None and not holders_count_df.empty:
-                st.dataframe(holders_count_df, width='stretch', hide_index=True)
+                render_styled_dataframe(holders_count_df, width='stretch', hide_index=True)
             else:
                 st.warning("该股股东户数数据获取失败。")
 
