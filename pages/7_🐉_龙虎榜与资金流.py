@@ -6,7 +6,7 @@ import datetime
 # 注入根目录路径
 sys.path.append(os.path.abspath("."))
 
-from visual_style import inject_premium_style, show_error_clean
+from visual_style import inject_premium_style, render_styled_dataframe, show_error_clean
 from market_monitor import render_market_monitor
 
 # --- 注入视觉与监控 ---
@@ -41,7 +41,7 @@ with tab_lhb:
 
         if df_lhb is not None and not df_lhb.empty:
             st.success(f"📌 {lhb_date} 共上榜 {len(df_lhb)} 次。")
-            st.dataframe(df_lhb, width='stretch', hide_index=True)
+            render_styled_dataframe(df_lhb, width='stretch', hide_index=True)
         else:
             st.warning("暂无数据，可能是周末/节假日，或者当日龙虎榜尚未公布（一般晚上 17:00 后更新）。")
 
@@ -59,6 +59,6 @@ with tab_flow:
 
         if df_flow is not None and not df_flow.empty:
             st.success(f"📌 共获取 {len(df_flow)} 只个股资金数据。")
-            st.dataframe(df_flow, width='stretch', hide_index=True)
+            render_styled_dataframe(df_flow, width='stretch', hide_index=True)
         else:
             st.warning("获取资金流向排名失败。可能非交易时段或接口限流。")
