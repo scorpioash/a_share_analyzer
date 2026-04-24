@@ -36,4 +36,4 @@ ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 # 启动命令
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
 
-ENTRYPOINT ["streamlit", "run", "首页.py", "--server.port=8501", "--server.address=0.0.0.0"]
+ENTRYPOINT ["sh", "-c", "streamlit run 首页.py --server.port=8501 --server.address=0.0.0.0"]
