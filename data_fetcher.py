@@ -1,4 +1,4 @@
-﻿import streamlit as st
+import streamlit as st
 import akshare as ak
 import pandas as pd
 pd.options.mode.string_storage = "python"
@@ -128,7 +128,8 @@ class EastMoneyDirectAPI:
         params = {
             'ut': 'fa5fd1943c7b386f172d6893dbfba10b',
             'invt': '2', 'fltt': '2',
-            'fields': 'f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f116,f117,f168,f169,f170',
+            # 增加 f62(主力净流入), f184(主力占比), f66(超大单), f72(大单), f78(中单), f84(小单)
+            'fields': 'f43,f44,f45,f46,f47,f48,f50,f57,f58,f60,f116,f117,f168,f169,f170,f62,f184,f66,f72,f78,f84',
             'secid': secid,
         }
         data = self._try_multi_hosts(self.PUSH_HOSTS, '/api/qt/stock/get', params,
@@ -157,6 +158,15 @@ class EastMoneyDirectAPI:
             'prev_close': _num(d.get('f60')),
             'change_pct': _num(d.get('f170')),
             'change_amt': _num(d.get('f169')),
+            # 实时资金流
+            'fund_flow': {
+                'main_net_in': _num(d.get('f62')),
+                'main_pct': _num(d.get('f184')),
+                'super_large_in': _num(d.get('f66')),
+                'large_in': _num(d.get('f72')),
+                'middle_in': _num(d.get('f78')),
+                'small_in': _num(d.get('f84')),
+            },
             'source': 'EM-Direct',
         }
 
@@ -309,7 +319,7 @@ def bypass_proxy(enable_dns_hijack: bool = True, mode: str = "auto"):
     if os.environ.get("AK_DNS_HIJACK", "").strip() == "0":
         enable_dns_hijack = False
 
-    if mode == "keep":
+    if mode in ("keep", "system"):
         yield
         return
 
@@ -524,6 +534,12 @@ class AShareDataFetcher:
                     info['price'] = new_info['price']
                 if not info.get('prev_close') and new_info.get('prev_close'):
                     info['prev_close'] = new_info['prev_close']
+                # 合并深度数据 (TDX)
+                if new_info.get('depth'):
+                    info['depth'] = new_info['depth']
+                # 合并资金流 (EM)
+                if new_info.get('fund_flow'):
+                    info['fund_flow'] = new_info['fund_flow']
                 info['source'] = info.get('source', '') + '+' + src
 
         # ---------- P-1: 通达信直连 (可选,代理免疫) ----------
@@ -774,6 +790,7 @@ class AShareDataFetcher:
     # 日 K 线 (多源: TDX -> akshare东财 -> 腾讯)
     # ==================================================================
     def get_daily_kline(self, code: str, limit: int = 30, spot_row: dict = None):
+        """获取日K线 (P1:TDX -> P2:东财 -> P3:腾讯) 并计算动能监控"""
         try:
             clean_code = code.lower().replace('sh', '').replace('sz', '')
             prefix = self._get_market_prefix(clean_code)
@@ -817,24 +834,33 @@ class AShareDataFetcher:
             if df.empty:
                 return "无历史数据", pd.DataFrame()
 
-            # 统一列名
-            df = df.rename(columns={
+            # 统一列名并去重
+            rename_map = {
                 'date': '日期', 'open': '开盘', 'close': '收盘',
-                'high': '最高', 'low': '最低', 'amount': '成交量',
-                'volume': '成交量',
-            })
+                'high': '最高', 'low': '最低',
+            }
+            if 'volume' in df.columns: rename_map['volume'] = '成交量'
+            elif 'amount' in df.columns: rename_map['amount'] = '成交量'
+            
+            df = df.rename(columns=rename_map)
+            df = df.loc[:, ~df.columns.duplicated()]
 
-            # 合并今日实时数据
+            # 数值化与缺失处理
+            for col in ['开盘', '收盘', '最高', '最低', '成交量']:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+            # 合并今日实时
             if spot_row:
                 today_str = datetime.now().strftime('%Y-%m-%d')
                 last_date = str(df.iloc[-1]['日期'])
                 new_row = {
-                    '日期': f"{today_str} (今日最新实盘)",
-                    '开盘': spot_row.get('open', 0),
-                    '收盘': spot_row.get('price', 0),
-                    '最高': spot_row.get('high', 0),
-                    '最低': spot_row.get('low', 0),
-                    '成交量': spot_row.get('volume', 0)
+                    '日期': f"{today_str} (实盘)",
+                    '开盘': float(spot_row.get('open', 0) or 0),
+                    '收盘': float(spot_row.get('price', 0) or 0),
+                    '最高': float(spot_row.get('high', 0) or 0),
+                    '最低': float(spot_row.get('low', 0) or 0),
+                    '成交量': float(spot_row.get('volume', 0) or 0)
                 }
                 if today_str in last_date:
                     for col in ['开盘', '收盘', '最高', '最低', '成交量']:
@@ -843,26 +869,28 @@ class AShareDataFetcher:
                 else:
                     df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
 
-            # 动能指标
+            # 计算动能 (确保全是标量)
             momentum_info = ""
             if len(df) >= 5:
-                v5 = df['成交量'].iloc[-6:-1].mean() if len(df) > 5 else df['成交量'].tail(5).mean()
-                cur_v = df['成交量'].iloc[-1]
-                v_ratio = cur_v / (v5 + 0.1)
-                p5_start = df['收盘'].iloc[-5]
-                p_cur = df['收盘'].iloc[-1]
-                p5_change = ((p_cur - p5_start) / (p5_start + 0.001)) * 100
-                ma5 = df['收盘'].rolling(window=5).mean().iloc[-1]
-                bias5 = ((p_cur - ma5) / (ma5 + 0.001)) * 100
+                v5 = float(df['成交量'].iloc[-6:-1].mean() if len(df) > 5 else df['成交量'].tail(5).mean())
+                cur_v = float(df['成交量'].iloc[-1])
+                v_ratio = float(cur_v / (v5 + 0.1))
+                p5_start = float(df['收盘'].iloc[-5])
+                p_cur = float(df['收盘'].iloc[-1])
+                p5_change = float(((p_cur - p5_start) / (p5_start + 0.001)) * 100)
+                ma5 = float(df['收盘'].rolling(window=5).mean().iloc[-1])
+                bias5 = float(((p_cur - ma5) / (ma5 + 0.001)) * 100)
+                
                 momentum_info = (
-                    f"\n> [!TIP]\n> **实时动能/偏离度监控**: 股价相较5日前涨跌幅 "
-                    f"{p5_change:.2f}%，量比 {v_ratio:.2f}，当前价格偏离5日线 {bias5:.2f}%。\n"
+                    f"\n> [提示]\n> **实时动能监控**: 股价相较5日前变动 "
+                    f"{p5_change:.2f}%，当前量比 {v_ratio:.2f}，股价偏离5日线 {bias5:.2f}%。\n"
                 )
-            recent = df.tail(limit).to_markdown(index=False)
-            return recent + momentum_info, df
+
+            recent_md = df.tail(limit).to_markdown(index=False)
+            return recent_md + momentum_info, df
         except Exception as e:
-            self._diag(f"K线抓取失败: {e}", "ERROR")
-            return "K线数据拉取失败", pd.DataFrame()
+            self._diag(f"K线抓取/处理失败: {e}", "ERROR")
+            return "K线数据解析失败", pd.DataFrame()
 
     def _calc_key_levels(self, daily_df: pd.DataFrame, lookback: int = 20):
         try:
@@ -1408,6 +1436,157 @@ class AShareDataFetcher:
     # ==================================================================
     # 智能诊股专用: 新闻(返回 str)
     # ==================================================================
+    # ==================================================================
+    # 核心分析工作流：组装 AI 分析上下文
+    # ==================================================================
+    def get_full_analysis_context(self, query: str):
+        """一次性采集所有维度数据，组装成给 AI 的 Markdown 上下文"""
+        self._last_diagnostics = []
+        code, name = self.get_stock_name_or_code(query)
+        if not code or name == "未找到":
+            return "", "", f"无法解析股票: {query}"
+
+        now = datetime.now()
+        is_trading = (now.weekday() < 5 and (
+            (9, 30) <= (now.hour, now.minute) <= (11, 30) or
+            (13, 0) <= (now.hour, now.minute) <= (15, 0)
+        ))
+
+        ctx = f"# 深度诊断报告: {name} ({code})\n"
+        ctx += f"分析基准时: {now.strftime('%Y-%m-%d %H:%M:%S')} {'(盘中)' if is_trading else '(非交易时段)'}\n\n"
+
+        # 0. 实时报价
+        spot = self._get_bulletproof_spot(code)
+        # 1. K线与动能
+        kline_md, df_k = self.get_daily_kline(code, limit=20, spot_row=spot)
+        
+        ctx += "## 1. 价格趋势与动能\n" + kline_md + "\n\n"
+
+        # 2. 实时状态
+        if spot:
+            ctx += "## 2. 今日实盘表现\n"
+            ctx += f"- 当前价: {spot['price']} ({spot['change_pct']}%)\n"
+            ctx += f"- 今日极值: 最高 {spot['high']} / 最低 {spot['low']}\n"
+            ctx += f"- 成交量: {spot['volume']} 手 / 成交额: {spot.get('amount', 0)}\n\n"
+
+            # 2.5 盘口深度与资金博弈 (NEW)
+            ctx += "### 2.5 实时盘口与资金流\n"
+            if spot.get('depth'):
+                d = spot['depth']
+                ctx += "#### 买卖五档 (TDX)\n"
+                ctx += "| 档位 | 卖价 | 卖量 | | 档位 | 买价 | 买量 |\n"
+                ctx += "| :--- | :--- | :--- | :--- | :--- | :--- | :--- |\n"
+                for i in range(4, -1, -1):
+                    ctx += f"| 卖{i+1} | {d['ask'][i]} | {d['ask_vol'][i]} | | 买{i+1} | {d['bid'][i]} | {d['bid_vol'][i]} |\n"
+                ctx += "\n"
+            
+            if spot.get('fund_flow'):
+                f = spot['fund_flow']
+                ctx += "#### 实时主力资金 (EM)\n"
+                ctx += f"- **主力净流入**: {f.get('main_net_in', 0)} (占比: {f.get('main_pct', 0)}%)\n"
+                ctx += f"- **超大单**: {f.get('super_large_in', 0)} / **大单**: {f.get('large_in', 0)}\n"
+                ctx += f"- **中单**: {f.get('middle_in', 0)} / **小单**: {f.get('small_in', 0)}\n\n"
+
+        # 2.7 行业对比 (NEW)
+        ctx += "### 2.7 行业/板块地位\n"
+        sector_info_dict = None
+        try:
+            spot_df = self._fetch_market_spot()
+            if not spot_df.empty:
+                my_row = spot_df[spot_df['代码'] == clean_code]
+                if not my_row.empty:
+                    industry = my_row.iloc[0].get('行业', '未知')
+                    if industry != '未知':
+                        industry_stocks = spot_df[spot_df['行业'] == industry]
+                        avg_chg = industry_stocks['涨跌幅'].mean()
+                        rank = (industry_stocks['涨跌幅'] > spot['change_pct']).sum() + 1
+                        sector_info_dict = {'industry': industry, 'avg_chg': avg_chg, 'rank': rank}
+                        ctx += f"- **所属行业**: {industry}\n"
+                        ctx += f"- **行业平均涨幅**: {avg_chg:.2f}%\n"
+                        ctx += f"- **行业内排名**: {rank} / {len(industry_stocks)}\n"
+                        ctx += f"- **对比结论**: {'强于' if spot['change_pct'] > avg_chg else '弱于'}板块平均水平\n\n"
+        except Exception:
+            pass
+
+        # 2.8 内置量化动能策略打分 (NEW)
+        try:
+            from quant_engine import QuantEngine
+            quant_res = QuantEngine.evaluate_stock(spot, df_k, sector_info_dict)
+            ctx += "### 2.8 内置短线动能策略打分\n"
+            ctx += f"- **综合得分**: {quant_res['score']} / 100\n"
+            ctx += f"- **系统交易信号**: **{quant_res['signal']}**\n"
+            ctx += "- **量化加减分项**:\n"
+            for d in quant_res['details']:
+                ctx += f"  - {d}\n"
+            ctx += "\n> [!IMPORTANT]\n> **系统最高指令**: 以上交易信号为内置量化模型计算的硬性纪律。你的分析结论必须以此信号为基础，严禁给出与此信号方向相反的建议（例如量化信号为清仓，你绝不能建议买入或持仓）。\n\n"
+        except Exception as e:
+            self._diag(f"量化引擎执行失败: {e}", "WARN")
+
+        # 3. 财务与基本面
+        ctx += "## 3. 财务与基本面核心\n"
+        try:
+            with bypass_proxy():
+                # 尝试拉取财务摘要
+                if hasattr(ak, 'stock_financial_benefit_ths'):
+                    f_df = ak.stock_financial_benefit_ths(symbol=code, indicator='按年度')
+                    if f_df is not None and not f_df.empty:
+                        ctx += "### 利润表摘要\n" + f_df.head(3).to_markdown(index=False) + "\n\n"
+                
+                # 核心指标
+                if hasattr(ak, 'stock_individual_info_em'):
+                    info_df = ak.stock_individual_info_em(symbol=code)
+                    if info_df is not None and not info_df.empty:
+                        ctx += "### 个股核心指标\n" + info_df.to_markdown(index=False) + "\n\n"
+        except Exception as e:
+            self._diag(f"财务数据抓取受限: {e}", "WARN")
+            ctx += "财务数据抓取受限，请结合历史业绩进行定性评估。\n\n"
+
+        # 4. 资金流向与龙虎榜
+        ctx += "## 4. 大资金动向 (LHB)\n"
+        try:
+            lhb_df = self.get_daily_dragon_tiger()
+            if not lhb_df.empty:
+                my_lhb = lhb_df[lhb_df.apply(lambda r: name in str(r.values), axis=1)]
+                if not my_lhb.empty:
+                    ctx += "### 龙虎榜异动\n" + my_lhb.head(3).to_markdown(index=False) + "\n\n"
+        except Exception:
+            pass
+
+        # 5. 股东研究
+        ctx += "## 5. 筹码与股东\n"
+        try:
+            gd_df = self.get_shareholder_count_detail(code)
+            if not gd_df.empty:
+                ctx += "### 股东户数变动\n" + gd_df.head(3).to_markdown(index=False) + "\n\n"
+        except Exception:
+            pass
+
+        # 6. 重要资讯
+        ctx += "## 6. 最近重要快讯\n"
+        ctx += self._get_news_summary(code) + "\n\n"
+
+        # 7. 全市场情绪
+        try:
+            sent_df = self.get_market_sentiment()
+            if not sent_df.empty:
+                ctx += "## 7. 全市场情绪背景\n" + sent_df.to_markdown(index=False) + "\n\n"
+        except Exception:
+            pass
+
+        return code, name, ctx
+
+    def _get_news_summary(self, code: str) -> str:
+        try:
+            df = self.get_stock_news_detail(code)
+            if not df.empty:
+                lines = []
+                for _, r in df.head(5).iterrows():
+                    lines.append(f"- [{r.get('发布时间','')}] {r.get('标题','')}")
+                return "\n".join(lines)
+        except Exception:
+            pass
+        return "暂无最新重大资讯。"
+
     def get_news(self, code: str) -> str:
         try:
             with bypass_proxy():
@@ -1544,8 +1723,27 @@ class AShareDataFetcher:
 
     def get_board_analysis_context(self, board_name: str, board_type: str = "行业板块", sub_boards: list = None) -> str:
         ctx = f"# 板块深度诊断报告: {board_name}\n\n"
-        ctx += "## 1. 历史活跃度与走势\n" + self.get_board_history(board_name, board_type) + "\n\n"
-        ctx += "## 2. 成分股核心标量\n" + self.get_board_constituents(board_name, board_type) + "\n\n"
+        
+        b_hist = self.get_board_history(board_name, board_type)
+        b_cons = self.get_board_constituents(board_name, board_type)
+        
+        ctx += "## 1. 历史活跃度与走势\n" + b_hist + "\n\n"
+        ctx += "## 2. 成分股核心标量\n" + b_cons + "\n\n"
+
+        # 2.5 内置量化情绪周期判定 (NEW)
+        try:
+            from quant_engine import QuantEngine
+            q_res = QuantEngine.evaluate_sector(b_hist, b_cons)
+            ctx += "### 2.5 内置量化情绪周期判定\n"
+            ctx += f"- **情绪阶段**: **{q_res['state']}** (评分: {q_res['score']}/100)\n"
+            ctx += f"- **系统操作建议**: **{q_res['signal']}**\n"
+            ctx += "- **判定依据**:\n"
+            for d in q_res['details']:
+                ctx += f"  - {d}\n"
+            ctx += "\n> [!IMPORTANT]\n> **系统最高指令**: 你的分析必须以此量化情绪周期(如主升期/退潮期)为基准进行推演定调，严禁违背系统判定的阶段。例如：系统判定为退潮期，你绝对不能建议买入或重仓。\n\n"
+        except Exception as e:
+            self._diag(f"板块量化引擎失败: {e}", "WARN")
+
         ctx += "## 3. 板块底层大资金流\n"
         try:
             with bypass_proxy():
@@ -1579,120 +1777,42 @@ class AShareDataFetcher:
     # ==================================================================
 
     def get_realtime_quotes(self, market_type: str = "沪深主板") -> pd.DataFrame:
-        """全市场实时行情 — 3_📈_行情中心.py 调用
-        优先级: 东财 akshare -> 雪球 -> 新浪
-        """
+        """全市场实时行情 — 3_📈_行情中心.py 调用"""
+        df = self._fetch_market_spot()
+        if df is None or df.empty:
+            self._diag(f"行情中心 {market_type}: 所有数据源均失败", "ERROR")
+            return pd.DataFrame()
 
-        def _filter_by_market(df, code_col='代码', is_xq=False):
-            if df is None or df.empty or code_col not in df.columns:
-                return df
-            codes = df[code_col].astype(str)
-            if is_xq:
-                if market_type == "沪深主板":
-                    return df[codes.str.match(r'^(SH60|SZ00[0-3])', na=False)]
-                elif market_type == "创业板":
-                    return df[codes.str.startswith('SZ30')]
-                elif market_type == "科创板":
-                    return df[codes.str.startswith('SH68')]
-                elif market_type == "北交所":
-                    return df[codes.str.match(r'^(BJ|SH8|SZ8)', na=False)]
-            else:
-                if market_type == "沪深主板":
-                    return df[codes.str.match(r'^(60|00[0-3])', na=False)]
-                elif market_type == "创业板":
-                    return df[codes.str.startswith('30')]
-                elif market_type == "科创板":
-                    return df[codes.str.startswith('68')]
-                elif market_type == "北交所":
-                    return df[codes.str.match(r'^(8[3-9]|43|92)', na=False)]
+        code_col = None
+        for c in ['代码', 'code', 'symbol']:
+            if c in df.columns:
+                code_col = c
+                break
+                
+        if not code_col:
             return df
+            
+        codes = df[code_col].astype(str)
+        # 清除可能带有的字母前缀，确保正则匹配准确
+        clean_codes = codes.str.replace(r'^(SH|SZ|BJ|sh|sz|bj)', '', regex=True)
+        
+        if market_type == "沪深主板":
+            out = df[clean_codes.str.match(r'^(60|00)', na=False)].copy()
+        elif market_type == "创业板":
+            out = df[clean_codes.str.match(r'^30', na=False)].copy()
+        elif market_type == "科创板":
+            out = df[clean_codes.str.match(r'^68', na=False)].copy()
+        elif market_type == "北交所":
+            # 涵盖北交所的 83, 87, 43, 92 等开头
+            out = df[clean_codes.str.match(r'^(8|43|9)', na=False)].copy()
+        else:
+            out = df.copy()
 
-        # P1: 东财 (akshare)
-        try:
-            with bypass_proxy():
-                df = ak.stock_zh_a_spot_em()
-                if df is not None and not df.empty:
-                    out = _filter_by_market(df, '代码', is_xq=False)
-                    if out is not None and not out.empty:
-                        self._diag(f"行情中心: 东财 ({market_type} N={len(out)})")
-                        return out.reset_index(drop=True)
-        except Exception:
-            self._diag(f"行情中心 东财跳过", "DEBUG")
+        if code_col in out.columns:
+            out[code_col] = clean_codes[out.index]
 
-        # P2: 雪球
-        try:
-            xq_type_map = {
-                "沪深主板": "SH,SZ", "创业板": "CYB",
-                "科创板": "KCB", "北交所": "BJ",
-            }
-            exchange = xq_type_map.get(market_type, "SH,SZ")
-            xq_url = (
-                "https://stock.xueqiu.com/v5/stock/screener/quote/list.json"
-                f"?page=1&size=200&order=desc&orderby=percent&order_by=percent"
-                f"&market=CN&type={exchange}"
-            )
-            with bypass_proxy():
-                resp = self.xq_session.get(xq_url, timeout=6)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    lst = (data.get('data') or {}).get('list') or []
-                    if lst:
-                        df = pd.DataFrame(lst)
-                        rename_map = {
-                            'symbol': '代码', 'name': '名称',
-                            'current': '最新价', 'percent': '涨跌幅',
-                            'chg': '涨跌额', 'volume': '成交量',
-                            'amount': '成交额', 'high': '最高',
-                            'low': '最低', 'open': '今开',
-                            'last_close': '昨收', 'turnover_rate': '换手率',
-                        }
-                        df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-                        out = _filter_by_market(df, '代码', is_xq=True)
-                        if out is not None and not out.empty:
-                            # 把 SH600000 格式清理成 600000
-                            out['代码'] = out['代码'].str.replace(r'^(SH|SZ|BJ)', '', regex=True)
-                            self._diag(f"行情中心: 雪球 ({market_type} N={len(out)})")
-                            return out.reset_index(drop=True)
-        except Exception as e:
-            self._diag(f"雪球行情失败: {type(e).__name__}", "WARN")
-
-        # P3: 新浪
-        try:
-            sina_map = {
-                "沪深主板": "hs_a", "创业板": "cyb",
-                "科创板": "kcb", "北交所": "bj_a",
-            }
-            node = sina_map.get(market_type, "hs_a")
-            sina_url = (
-                "http://vip.stock.finance.sina.com.cn/quotes_service/api/json_v2.php/"
-                f"Market_Center.getHQNodeData?page=1&num=200&sort=changepercent&asc=0&node={node}"
-            )
-            with bypass_proxy():
-                resp = requests.get(sina_url, timeout=5)
-                if resp.status_code == 200:
-                    txt = resp.text.strip()
-                    if txt and txt != '[]':
-                        data = json.loads(txt)
-                        if data:
-                            df = pd.DataFrame(data)
-                            rename_map = {
-                                'symbol': '代码', 'name': '名称',
-                                'trade': '最新价', 'changepercent': '涨跌幅',
-                                'pricechange': '涨跌额', 'volume': '成交量',
-                                'amount': '成交额', 'high': '最高',
-                                'low': '最低', 'open': '今开',
-                                'settlement': '昨收', 'turnoverratio': '换手率',
-                            }
-                            df = df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns})
-                            if '代码' in df.columns:
-                                df['代码'] = df['代码'].str.replace(r'^(sh|sz|bj)', '', regex=True)
-                            self._diag(f"行情中心: 新浪 ({market_type} N={len(df)})")
-                            return df.reset_index(drop=True)
-        except Exception as e:
-            self._diag(f"新浪行情失败: {type(e).__name__}", "WARN")
-
-        self._diag(f"行情中心 {market_type}: 所有数据源均失败", "ERROR")
-        return pd.DataFrame()
+        self._diag(f"行情中心: 综合快照 ({market_type} N={len(out)})")
+        return out.reset_index(drop=True)
 
     def get_limit_pool(self, pool_type: str = "涨停") -> pd.DataFrame:
         """特征股池 — 4_🔥_盘口异动.py 调用"""
@@ -1811,26 +1931,40 @@ class AShareDataFetcher:
         clean_code = code.replace("sh", "").replace("sz", "")
         try:
             with bypass_proxy():
-                return ak.stock_news_em(symbol=clean_code)
+                import pandas as pd
+                original_mode = pd.options.mode.string_storage
+                try:
+                    pd.options.mode.string_storage = "python"
+                    return ak.stock_news_em(symbol=clean_code)
+                finally:
+                    pd.options.mode.string_storage = original_mode
         except Exception as e:
             self._diag(f"个股新闻失败: {type(e).__name__}", "WARN")
         return pd.DataFrame()
 
     def get_daily_dragon_tiger(self, date_str: str = None) -> pd.DataFrame:
         """龙虎榜 — 7_🐉_龙虎榜与资金流.py 调用"""
-        if not date_str:
-            date_str = datetime.now().strftime("%Y%m%d")
-        try:
-            with bypass_proxy():
-                if hasattr(ak, 'stock_lhb_detail_em'):
-                    try:
-                        return ak.stock_lhb_detail_em(start_date=date_str, end_date=date_str)
-                    except Exception:
-                        pass
-                if hasattr(ak, 'stock_lhb_detail_daily_sina'):
-                    return ak.stock_lhb_detail_daily_sina(date=date_str)
-        except Exception as e:
-            self._diag(f"龙虎榜失败: {type(e).__name__}", "WARN")
+        dates_to_try = [date_str] if date_str else [
+            datetime.now().strftime("%Y%m%d"),
+            (datetime.now() - pd.Timedelta(days=1)).strftime("%Y%m%d"),
+            (datetime.now() - pd.Timedelta(days=2)).strftime("%Y%m%d")
+        ]
+        
+        for d in dates_to_try:
+            try:
+                with bypass_proxy():
+                    if hasattr(ak, 'stock_lhb_detail_em'):
+                        try:
+                            df = ak.stock_lhb_detail_em(start_date=d, end_date=d)
+                            if df is not None and not df.empty: return df
+                        except Exception:
+                            pass
+                    if hasattr(ak, 'stock_lhb_detail_daily_sina'):
+                        df = ak.stock_lhb_detail_daily_sina(date=d)
+                        if df is not None and not df.empty: return df
+            except Exception:
+                continue
+        self._diag("龙虎榜近三日均无数据或接口失效", "WARN")
         return pd.DataFrame()
 
     def get_fund_flow_rank(self, indicator: str = "今日") -> pd.DataFrame:
