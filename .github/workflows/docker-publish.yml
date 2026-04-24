@@ -32,5 +32,9 @@ jobs:
           # 简单冒烟测试，确保容器能启动
           docker run -d -p 8501:8501 --name test-container a-share-analyzer:latest
           sleep 10
-          docker ps | grep test-container
+          if ! docker ps | grep -q test-container; then
+            echo "Container crashed! Fetching logs:"
+            docker logs test-container
+            exit 1
+          fi
           docker stop test-container
