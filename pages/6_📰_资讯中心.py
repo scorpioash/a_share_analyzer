@@ -5,7 +5,7 @@ import sys
 # 注入根目录路径
 sys.path.append(os.path.abspath("."))
 
-from visual_style import inject_premium_style, show_error_clean
+from visual_style import inject_premium_style, render_styled_dataframe, show_error_clean
 from market_monitor import render_market_monitor
 
 # --- 注入视觉与监控 ---
@@ -45,7 +45,7 @@ with tab_global:
             if '发布时间' in df_global.columns:
                 col_config['发布时间'] = st.column_config.TextColumn("发布时间", width="medium")
 
-            st.dataframe(df_global, width='stretch', hide_index=True,
+            render_styled_dataframe(df_global, width='stretch', hide_index=True,
                          column_config=col_config if col_config else None)
         else:
             st.warning("拉取财经快讯失败，请重试或检查网络。")
@@ -74,7 +74,7 @@ with tab_individual:
                         col_config[c] = st.column_config.LinkColumn(
                             str(c), display_text="查看原文"
                         )
-                st.dataframe(df_news, width='stretch', hide_index=True,
+                render_styled_dataframe(df_news, width='stretch', hide_index=True,
                              column_config=col_config if col_config else None)
             else:
                 # 回退到 str 版 get_news
