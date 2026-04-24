@@ -4,6 +4,10 @@ FROM python:3.10-slim
 # 设置工作目录
 WORKDIR /app
 
+# 解决 Linux 环境下中文字符集导致的文件读取报错问题
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
 # 安装必要的系统依赖（PDF 生成和网络工具）
 RUN apt-get update && apt-get install -y \
     build-essential \
@@ -32,4 +36,4 @@ ENV STREAMLIT_SERVER_ADDRESS=0.0.0.0
 # 启动命令
 HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health
 
-ENTRYPOINT ["streamlit", "run", "app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+ENTRYPOINT ["streamlit", "run", "首页.py", "--server.port=8501", "--server.address=0.0.0.0"]
