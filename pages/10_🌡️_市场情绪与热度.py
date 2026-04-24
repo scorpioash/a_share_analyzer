@@ -5,7 +5,7 @@ import sys
 # 注入根目录路径
 sys.path.append(os.path.abspath("."))
 
-from visual_style import inject_premium_style, show_error_clean
+from visual_style import inject_premium_style, render_styled_dataframe, show_error_clean
 from market_monitor import render_market_monitor
 
 # --- 注入视觉与监控 ---
@@ -44,7 +44,7 @@ with tab_hot:
             if '排名' in df_hot.columns:
                 df_hot = df_hot.sort_values(by='排名')
 
-            st.dataframe(df_hot, width='stretch', hide_index=True)
+            render_styled_dataframe(df_hot, width='stretch', hide_index=True)
         else:
             st.warning("获取股票热度榜失败，可能接口被限流或非交易时段。")
 
@@ -82,7 +82,7 @@ with tab_sentiment:
                 pass
 
             st.markdown("### 详细指标表")
-            st.dataframe(df_sent, width='stretch', hide_index=True)
+            render_styled_dataframe(df_sent, width='stretch', hide_index=True)
         else:
             st.warning("获取赚钱效应数据失败，可能非交易时段或全市场快照接口受限。")
             diags = fetcher.get_last_diagnostics() if hasattr(fetcher, 'get_last_diagnostics') else []
