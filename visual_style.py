@@ -19,8 +19,7 @@ def inject_premium_style():
 
         /* 侧边栏主体 */
         [data-testid="stSidebar"] {
-            background-color: rgba(26, 32, 44, 0.98);
-            backdrop-filter: blur(15px);
+            background-color: rgba(26, 32, 44, 1);
             border-right: 1px solid rgba(255, 215, 0, 0.15);
         }
 
@@ -35,7 +34,7 @@ def inject_premium_style():
             display: flex !important;
             flex-direction: column !important;
             justify-content: space-between !important;
-            transition: all 0.4s ease !important;
+            transition: transform 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease !important;
         }
         
         /* 侧边栏整体文字高亮补丁 */
@@ -173,7 +172,7 @@ def inject_premium_style():
             display: flex !important;
             flex-direction: column !important;
             justify-content: space-between !important;
-            transition: all 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) !important;
+            transition: transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), box-shadow 0.2s ease, background 0.2s ease !important;
             box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1) !important;
         }
         
@@ -224,3 +223,65 @@ def inject_premium_style():
 def show_error_clean(msg: str):
     """显示干净的错误信息，无堆栈干扰"""
     st.error(f"🔴 系统提示：{msg}")
+
+def _color_positive_negative(val):
+    import pandas as pd
+    if not isinstance(val, (int, float)) or pd.isna(val):
+        return ''
+    if val > 0:
+        return 'color: #ff3333; font-weight: bold;'  # 红涨
+    elif val < 0:
+        return 'color: #00cc66; font-weight: bold;'  # 绿跌
+    return 'color: #888888;'
+
+def _format_percentage(val):
+    import pandas as pd
+    if pd.isna(val):
+        return ""
+    if isinstance(val, (int, float)):
+        return f"{val:.2f}%"
+    return str(val)
+
+def _format_price(val):
+    import pandas as pd
+    if pd.isna(val):
+        return ""
+    if isinstance(val, (int, float)):
+        return f"{val:.2f}"
+    return str(val)
+
+def render_styled_dataframe(df, **kwargs):
+    """全局统一的 DataFrame 渲染函数，自动格式化数值并标红标绿"""
+    import pandas as pd
+    if df is None or df.empty:
+        st.dataframe(df, **kwargs)
+        return
+        
+    df_clean = df.copy()
+    
+    # 识别需要处理的列
+    # 涨跌幅类 (需要百分号 + 变色)
+    pct_cols = [c for c in df_clean.columns if any(k in c for k in ['幅', '换手率', '比率', '溢价', '振幅'])]
+    # 绝对值类 (需要变色，不加百分号)
+    val_cols = [c for c in df_clean.columns if any(k in c for k in ['涨跌额', '净流入', '净额', '差额', '主力净'])]
+    
+    # 将需要处理的列尽可能转为数值型
+    for c in pct_cols + val_cols:
+        df_clean[c] = pd.to_numeric(df_clean[c], errors='coerce')
+        
+    # 定义 Styler
+    styled_df = df_clean.style
+    
+    # 格式化百分比
+    if pct_cols:
+        styled_df = styled_df.format({c: _format_percentage for c in pct_cols})
+        
+    # 上色
+    color_cols = [c for c in (pct_cols + val_cols) if df_clean[c].dtype in ['float64', 'int64']]
+    if color_cols:
+        if hasattr(styled_df, 'map'):
+            styled_df = styled_df.map(_color_positive_negative, subset=color_cols)
+        else:
+            styled_df = styled_df.applymap(_color_positive_negative, subset=color_cols)
+            
+    st.dataframe(styled_df, **kwargs)
