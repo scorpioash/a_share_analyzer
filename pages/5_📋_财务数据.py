@@ -6,7 +6,7 @@ from datetime import datetime
 # 注入根目录路径
 sys.path.append(os.path.abspath("."))
 
-from visual_style import inject_premium_style, show_error_clean
+from visual_style import inject_premium_style, render_styled_dataframe, show_error_clean
 from market_monitor import render_market_monitor
 
 # --- 注入视觉与监控 ---
@@ -62,7 +62,7 @@ with tab_report:
 
         if df_report is not None and not df_report.empty:
             st.success(f"📌 共拉取到 {len(df_report)} 条企业披露记录。")
-            st.dataframe(df_report, width='stretch', hide_index=True)
+            render_styled_dataframe(df_report, width='stretch', hide_index=True)
         else:
             st.warning(f"未获取到 {report_date} 的 {report_type} 数据。可能原因：\n"
                        f"- 该报告期尚未到披露窗口\n"
@@ -81,6 +81,6 @@ with tab_research:
 
         if df_research is not None and not df_research.empty:
             st.success(f"📌 共拉取到 {len(df_research)} 条调研记录。")
-            st.dataframe(df_research, width='stretch', hide_index=True)
+            render_styled_dataframe(df_research, width='stretch', hide_index=True)
         else:
             st.warning("机构调研数据获取失败或今日暂无新记录。")
