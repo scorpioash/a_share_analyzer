@@ -6,7 +6,7 @@ import pandas as pd
 # 注入根目录路径
 sys.path.append(os.path.abspath("."))
 
-from visual_style import inject_premium_style, show_error_clean
+from visual_style import inject_premium_style, render_styled_dataframe, show_error_clean
 from market_monitor import render_market_monitor
 
 # --- 注入视觉与监控 ---
@@ -46,7 +46,7 @@ def _display_board(df, name):
         df_sorted[sort_col] = pd.to_numeric(df_sorted[sort_col], errors='coerce')
         df_sorted = df_sorted.sort_values(by=sort_col, ascending=False, na_position='last')
 
-    st.dataframe(df_sorted, width='stretch', hide_index=True)
+    render_styled_dataframe(df_sorted, width='stretch', hide_index=True)
 
 with tab_industry:
     st.info("拉取东方财富/同花顺行业板块排名榜单。")
