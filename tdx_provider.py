@@ -105,6 +105,13 @@ class TDXProvider:
                 "volume": q.get('vol', 0), # 单位：手
                 "amount": q.get('amount', 0),
                 "change_pct": change_pct,
+                # 盘口深度 (买卖五档)
+                "depth": {
+                    "bid": [q.get(f'bid{i}', 0) for i in range(1, 6)],
+                    "bid_vol": [q.get(f'bid_vol{i}', 0) for i in range(1, 6)],
+                    "ask": [q.get(f'ask{i}', 0) for i in range(1, 6)],
+                    "ask_vol": [q.get(f'ask_vol{i}', 0) for i in range(1, 6)],
+                },
                 "server_time": q.get('server_time', ''),
                 "source": "TDX"
             }
