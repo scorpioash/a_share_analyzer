@@ -81,8 +81,13 @@ with col_opt:
                 dotenv.set_key(env_path, "GEMINI_MODEL", new_model)
             
             dotenv.load_dotenv(override=True)
-            st.success("配置已更新！")
+            st.session_state['api_saved'] = True
             st.rerun()
+
+# 处理刚刚保存配置的 Toast 提示
+if st.session_state.get('api_saved', False):
+    st.toast("✅ API 配置已保存", icon="💾")
+    st.session_state['api_saved'] = False
 
 # ============== 初始化业务组件 ==============
 st.sidebar.header("🧭 功能导航")
