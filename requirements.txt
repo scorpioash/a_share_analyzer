@@ -14,3 +14,7 @@ pytz
 
 # Web UI 可视化界面
 streamlit
+
+# 附加依赖
+fpdf2
+pytdx
