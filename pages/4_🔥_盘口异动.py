@@ -6,7 +6,7 @@ import pandas as pd
 # 注入根目录路径
 sys.path.append(os.path.abspath("."))
 
-from visual_style import inject_premium_style, show_error_clean
+from visual_style import inject_premium_style, render_styled_dataframe, show_error_clean
 from market_monitor import render_market_monitor
 
 # --- 注入视觉与监控 ---
@@ -49,7 +49,7 @@ with tab_pools:
             if sort_col:
                 df_clean[sort_col] = pd.to_numeric(df_clean[sort_col], errors='coerce')
                 df_clean = df_clean.sort_values(by=sort_col, ascending=False, na_position='last')
-            st.dataframe(df_clean, width='stretch', hide_index=True)
+            render_styled_dataframe(df_clean, width='stretch', hide_index=True)
         else:
             st.warning(f"暂无 {pool_type} 数据。可能原因：\n"
                        f"- 盘后/节假日数据未更新\n"
@@ -77,7 +77,7 @@ with tab_changes:
                 st.error(f"❌ 抓取异常: {type(e).__name__}: {e}")
 
         if df_changes is not None and not df_changes.empty:
-            st.dataframe(df_changes, width='stretch', hide_index=True)
+            render_styled_dataframe(df_changes, width='stretch', hide_index=True)
         else:
             st.warning("今日该类型暂无异动数据（盘后/节假日常见）。")
 
@@ -94,7 +94,7 @@ with tab_board_changes:
                     else:
                         df_bc = None
                 if df_bc is not None and not df_bc.empty:
-                    st.dataframe(df_bc, width='stretch', hide_index=True)
+                    render_styled_dataframe(df_bc, width='stretch', hide_index=True)
                 else:
                     st.warning("今日暂无板块异动数据。")
             except Exception as e:
