@@ -6,7 +6,7 @@ import pandas as pd
 # 注入根目录路径
 sys.path.append(os.path.abspath("."))
 
-from visual_style import inject_premium_style, show_error_clean
+from visual_style import inject_premium_style, show_error_clean, render_styled_dataframe
 from market_monitor import render_market_monitor
 
 # --- 注入视觉与监控 ---
@@ -60,7 +60,7 @@ if st.button(f"获取 {market_type} 最新行情"):
             df_clean[sort_by] = pd.to_numeric(df_clean[sort_by], errors='coerce')
             df_clean = df_clean.sort_values(by=sort_by, ascending=False, na_position='last')
 
-        st.dataframe(df_clean[available_cols], width='stretch', hide_index=True)
+        render_styled_dataframe(df_clean[available_cols], width='stretch', hide_index=True)
     else:
         st.error("数据拉取失败，请检查网络或接口是否因频繁访问被限制。")
         # 显示诊断日志便于排查
