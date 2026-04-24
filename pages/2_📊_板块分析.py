@@ -50,8 +50,7 @@ if 'board_results' in st.session_state and st.session_state['board_results']:
     options = [f"{r['name']} ({r['type']})" for r in results]
     selected_idx = st.selectbox("选择要诊断的板块：", range(len(options)), format_func=lambda i: options[i], key="board_select")
     selected = results[selected_idx]
-    
-    extra_board_notes = st.text_area("💡 附加经验/想法（可选）", placeholder="例如：我认为商业航天最近受政策催化，重点关注火箭发射相关...", height=80, key="board_notes")
+
     enable_sub = st.checkbox("🔬 开启子板块深度拆解", value=True, key="enable_sub_board")
     
     # --- State Preservation Logic ---
@@ -101,8 +100,6 @@ if 'board_results' in st.session_state and st.session_state['board_results']:
                 
                 st.write("3. 正在拉取核心数据...")
                 data_ctx = fetcher.get_board_analysis_context(board_name, board_type, sub_boards)
-                if extra_board_notes.strip():
-                    data_ctx += f"\n\n## 用户附加的个人判断与经验\n{extra_board_notes.strip()}\n"
                 
                 st.write("4. 正在呼叫模型进行推理...")
                 analysis_result = analyzer.analyze_board(data_ctx, board_name)
